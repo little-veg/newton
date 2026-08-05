@@ -15,6 +15,322 @@ from ....geometry import GeoType
 from ....math import velocity_at_point
 from ....sim import Model
 from ....utils.mesh import MeshAdjacency
+from .kinematic_mesh_contact_kernels import (
+    accumulate_contact_diagonal,
+    accumulate_contact_force,
+    accumulate_damping_diagonal,
+    accumulate_damping_force,
+    accumulate_friction_diagonal,
+    accumulate_friction_force,
+    contact_hessian_multiply,
+    damping_hessian_multiply,
+    friction_hessian_multiply,
+)
+
+
+class _KinematicContactBuffer:
+    """Fixed-capacity dynamic-only frozen contact data."""
+
+    def __init__(self, arity: int, capacity: int, particle_count: int, device: Any):
+        if arity not in (1, 2, 3):
+            raise ValueError("contact arity must be one, two, or three")
+        if capacity <= 0 or particle_count <= 0:
+            raise ValueError("contact capacity and particle count must be positive")
+        self.arity = int(arity)
+        self.capacity = int(capacity)
+        self.particle_count = int(particle_count)
+        self.device = wp.get_device(device)
+        self.ids = wp.zeros((capacity, arity), dtype=wp.int32, device=self.device)
+        self.weights = wp.zeros((capacity, arity), dtype=wp.float32, device=self.device)
+        self.directions = wp.zeros(capacity, dtype=wp.vec3, device=self.device)
+        self.depths = wp.zeros(capacity, dtype=wp.float32, device=self.device)
+        self.rigid_velocities = wp.zeros(capacity, dtype=wp.vec3, device=self.device)
+        self.count = wp.zeros(1, dtype=wp.int32, device=self.device)
+        self.overflow_count = wp.zeros(1, dtype=wp.int32, device=self.device)
+
+    def clear(self) -> None:
+        """Reset attempted-contact and overflow counters."""
+        self.count.zero_()
+        self.overflow_count.zero_()
+
+    def accumulate_force(self, stiffness: float, output: wp.array[wp.vec3]) -> None:
+        """Add frozen normal contact forces."""
+        self._validate_particle_array(output, wp.vec3)
+        wp.launch(
+            accumulate_contact_force,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.depths,
+                self.count,
+                self.arity,
+                self.capacity,
+                stiffness,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def hessian_multiply(
+        self,
+        stiffness: float,
+        vector: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add frozen normal contact Hessian-vector products."""
+        self._validate_particle_array(vector, wp.vec3)
+        self._validate_particle_array(output, wp.vec3)
+        wp.launch(
+            contact_hessian_multiply,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.count,
+                self.arity,
+                self.capacity,
+                stiffness,
+                vector,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def accumulate_diagonal(self, stiffness: float, output: wp.array[wp.mat33]) -> None:
+        """Add exact diagonal blocks of the frozen normal Hessian."""
+        self._validate_particle_array(output, wp.mat33)
+        wp.launch(
+            accumulate_contact_diagonal,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.count,
+                self.arity,
+                self.capacity,
+                stiffness,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def accumulate_damping_force(
+        self,
+        damping: float,
+        dt: float,
+        velocities: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add approaching-only normal damping forces."""
+        self._validate_particle_array(velocities, wp.vec3)
+        self._validate_particle_array(output, wp.vec3)
+        wp.launch(
+            accumulate_damping_force,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.rigid_velocities,
+                self.count,
+                self.arity,
+                self.capacity,
+                damping,
+                velocities,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def damping_hessian_multiply(
+        self,
+        damping: float,
+        dt: float,
+        velocities: wp.array[wp.vec3],
+        vector: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add active normal damping Hessian-vector products."""
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        self._validate_particle_array(velocities, wp.vec3)
+        self._validate_particle_array(vector, wp.vec3)
+        self._validate_particle_array(output, wp.vec3)
+        wp.launch(
+            damping_hessian_multiply,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.rigid_velocities,
+                self.count,
+                self.arity,
+                self.capacity,
+                damping / dt,
+                velocities,
+                vector,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def accumulate_damping_diagonal(
+        self,
+        damping: float,
+        dt: float,
+        velocities: wp.array[wp.vec3],
+        output: wp.array[wp.mat33],
+    ) -> None:
+        """Add active normal damping diagonal Hessian blocks."""
+        if dt <= 0.0:
+            raise ValueError("dt must be positive")
+        self._validate_particle_array(velocities, wp.vec3)
+        self._validate_particle_array(output, wp.mat33)
+        wp.launch(
+            accumulate_damping_diagonal,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.rigid_velocities,
+                self.count,
+                self.arity,
+                self.capacity,
+                damping / dt,
+                velocities,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def accumulate_friction_force(
+        self,
+        stiffness: float,
+        friction: float,
+        friction_epsilon: float,
+        dt: float,
+        positions: wp.array[wp.vec3],
+        anchor_positions: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add regularized Coulomb friction forces."""
+        self._validate_friction_arrays(positions, anchor_positions, output, wp.vec3)
+        wp.launch(
+            accumulate_friction_force,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.depths,
+                self.rigid_velocities,
+                self.count,
+                self.arity,
+                self.capacity,
+                stiffness,
+                friction,
+                friction_epsilon * dt,
+                dt,
+                positions,
+                anchor_positions,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def friction_hessian_multiply(
+        self,
+        stiffness: float,
+        friction: float,
+        friction_epsilon: float,
+        dt: float,
+        positions: wp.array[wp.vec3],
+        anchor_positions: wp.array[wp.vec3],
+        vector: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add regularized friction Hessian-vector products."""
+        self._validate_friction_arrays(positions, anchor_positions, vector, wp.vec3)
+        self._validate_particle_array(output, wp.vec3)
+        wp.launch(
+            friction_hessian_multiply,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.depths,
+                self.rigid_velocities,
+                self.count,
+                self.arity,
+                self.capacity,
+                stiffness,
+                friction,
+                friction_epsilon * dt,
+                dt,
+                positions,
+                anchor_positions,
+                vector,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def accumulate_friction_diagonal(
+        self,
+        stiffness: float,
+        friction: float,
+        friction_epsilon: float,
+        dt: float,
+        positions: wp.array[wp.vec3],
+        anchor_positions: wp.array[wp.vec3],
+        output: wp.array[wp.mat33],
+    ) -> None:
+        """Add regularized friction diagonal Hessian blocks."""
+        self._validate_friction_arrays(positions, anchor_positions, output, wp.mat33)
+        wp.launch(
+            accumulate_friction_diagonal,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.depths,
+                self.rigid_velocities,
+                self.count,
+                self.arity,
+                self.capacity,
+                stiffness,
+                friction,
+                friction_epsilon * dt,
+                dt,
+                positions,
+                anchor_positions,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def _validate_friction_arrays(
+        self,
+        positions: wp.array[wp.vec3],
+        anchor_positions: wp.array[wp.vec3],
+        output: wp.array,
+        output_dtype: Any,
+    ) -> None:
+        self._validate_particle_array(positions, wp.vec3)
+        self._validate_particle_array(anchor_positions, wp.vec3)
+        self._validate_particle_array(output, output_dtype)
+
+    def _validate_particle_array(self, array: wp.array, dtype: Any) -> None:
+        if array.device != self.device or array.dtype != dtype or len(array) != self.particle_count:
+            raise ValueError(f"particle array must contain {self.particle_count} {dtype} values on {self.device}")
 
 
 @wp.kernel
@@ -222,4 +538,3 @@ class ConstraintKinematicMeshContact:
             outputs=[self.collider_positions, self.collider_velocities],
             device=self.device,
         )
-
