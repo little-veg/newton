@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 import numpy as np
 import warp as wp
 
@@ -487,11 +489,10 @@ class Example:
     def create_parser():
         parser = newton.examples.create_parser()
         parser.add_argument(
-            "--no-graph-capture",
-            action="store_false",
-            dest="graph_capture",
+            "--graph-capture",
+            action=argparse.BooleanOptionalAction,
             default=True,
-            help="Disable CUDA graph capture.",
+            help="Enable CUDA graph capture.",
         )
         return parser
 

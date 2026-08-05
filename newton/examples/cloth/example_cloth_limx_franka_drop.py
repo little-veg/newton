@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import argparse
+
 import numpy as np
 import warp as wp
 
@@ -302,9 +304,20 @@ class Example:
         )
         self.viewer.end_frame()
 
+    @staticmethod
+    def create_parser():
+        parser = newton.examples.create_parser()
+        parser.add_argument(
+            "--graph-capture",
+            action=argparse.BooleanOptionalAction,
+            default=True,
+            help="Enable CUDA graph capture.",
+        )
+        return parser
+
 
 if __name__ == "__main__":
-    parser = newton.examples.create_parser()
+    parser = Example.create_parser()
     parser.set_defaults(num_frames=600)
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)
