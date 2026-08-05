@@ -135,6 +135,7 @@ class Example:
             hx=TABLE_HALF_EXTENTS[0],
             hy=TABLE_HALF_EXTENTS[1],
             hz=TABLE_HALF_EXTENTS[2],
+            color=wp.vec3(0.35, 0.37, 0.42),
             label="table",
         )
 
@@ -186,6 +187,7 @@ class Example:
         self._build_ik()
 
         self.viewer.set_model(self.model)
+        self.viewer.show_triangles = False
         self.viewer.set_camera(wp.vec3(0.85, -1.45, 0.95), -22.0, 125.0)
         if hasattr(self.viewer, "camera") and hasattr(self.viewer.camera, "look_at"):
             self.viewer.camera.look_at(wp.vec3(0.0, -0.5, 0.25))
@@ -346,6 +348,14 @@ class Example:
     def render(self):
         self.viewer.begin_frame(self.sim_time)
         self.viewer.log_state(self.state_0)
+        self.viewer.log_mesh(
+            "/cloth",
+            self.state_0.particle_q,
+            self.model.tri_indices.flatten(),
+            backface_culling=False,
+            color=(0.95, 0.68, 0.05),
+            roughness=0.9,
+        )
         self.viewer.end_frame()
 
     @staticmethod
