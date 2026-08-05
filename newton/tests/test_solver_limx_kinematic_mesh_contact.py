@@ -200,5 +200,76 @@ class TestKinematicContactBuffer(unittest.TestCase):
         np.testing.assert_allclose(diagonal.numpy(), expected_diagonal, atol=1.0e-5)
 
 
+class TestConstraintKinematicMeshVF(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.device = wp.get_device("cuda:0")
+
+    def _make_vf_fixture(self, cloth_positions, rigid_vertices):
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        rigid_mesh = newton.Mesh(
+            vertices=np.asarray(rigid_vertices, dtype=np.float32),
+            indices=np.asarray((0, 1, 2), dtype=np.int32),
+            compute_inertia=False,
+        )
+        shape = builder.add_shape_mesh(body=body, mesh=rigid_mesh)
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in cloth_positions],
+            vel=[wp.vec3(0.0)] * 3,
+            mass=[1.0] * 3,
+            radius=[0.003] * 3,
+        )
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=self.device)
+        state = model.state()
+        constraint = newton.solvers.ConstraintKinematicMeshContact(
+            model=model,
+            shape_indices=[shape],
+            thickness=0.003,
+            stiffness=2.0e4,
+            normal_damping=0.5,
+            friction=0.4,
+            friction_epsilon=1.0e-2,
+            max_contacts=16,
+        )
+        constraint.update_colliders(state.body_q, state.body_qd)
+        constraint.begin_step(state.particle_q, state.particle_qd, 1.0 / 600.0)
+        constraint.prepare(state.particle_q)
+        return constraint, state
+
+    def test_detects_cloth_vertex_against_rigid_face(self):
+        """Detect an interior cloth-vertex/rigid-face contact."""
+        constraint, _state = self._make_vf_fixture(
+            cloth_positions=((0.0, 0.0, 0.002), (10.0, 0.0, 1.0), (0.0, 10.0, 1.0)),
+            rigid_vertices=((-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (0.0, 1.0, 0.0)),
+        )
+        contacts = constraint.cloth_vertex_face_contacts
+
+        self.assertEqual(int(contacts.count.numpy()[0]), 1)
+        np.testing.assert_array_equal(contacts.ids.numpy()[0], [0])
+        np.testing.assert_allclose(contacts.weights.numpy()[0], [1.0], atol=0.0)
+        np.testing.assert_allclose(contacts.directions.numpy()[0], [0.0, 0.0, 1.0], atol=1.0e-6)
+        np.testing.assert_allclose(contacts.depths.numpy()[0], 0.001, atol=1.0e-6)
+
+    def test_detects_rigid_vertex_against_cloth_face(self):
+        """Detect a rigid vertex over a cloth-face interior with dynamic face weights."""
+        constraint, state = self._make_vf_fixture(
+            cloth_positions=((-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (0.0, 1.0, 0.0)),
+            rigid_vertices=((0.0, 0.0, 0.002), (10.0, 0.0, 1.0), (0.0, 10.0, 1.0)),
+        )
+        contacts = constraint.rigid_vertex_face_contacts
+
+        self.assertEqual(int(contacts.count.numpy()[0]), 1)
+        np.testing.assert_array_equal(contacts.ids.numpy()[0], [0, 1, 2])
+        np.testing.assert_allclose(contacts.weights.numpy()[0], [-0.25, -0.25, -0.5], atol=1.0e-6)
+        np.testing.assert_allclose(contacts.directions.numpy()[0], [0.0, 0.0, 1.0], atol=1.0e-6)
+        np.testing.assert_allclose(contacts.depths.numpy()[0], 0.001, atol=1.0e-6)
+
+        force = wp.zeros(3, dtype=wp.vec3, device=self.device)
+        constraint.accumulate_force(state.particle_q, force)
+        self.assertLess(float(force.numpy()[:, 2].sum()), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

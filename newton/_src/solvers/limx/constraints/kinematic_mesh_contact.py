@@ -24,7 +24,10 @@ from .kinematic_mesh_contact_kernels import (
     accumulate_friction_force,
     contact_hessian_multiply,
     damping_hessian_multiply,
+    detect_cloth_vertex_rigid_face,
+    detect_rigid_vertex_cloth_face,
     friction_hessian_multiply,
+    update_triangle_bounds,
 )
 
 
@@ -501,10 +504,34 @@ class ConstraintKinematicMeshContact:
         self.collider_body = wp.array(bodies_np, dtype=wp.int32, device=self.device)
         self.collider_triangles = wp.array(triangles_np, dtype=wp.int32, device=self.device)
         self.collider_edges = wp.array(edges_np, dtype=wp.int32, device=self.device)
-        self.collider_positions = wp.empty_like(self.collider_local_positions)
-        self.collider_velocities = wp.empty_like(self.collider_local_positions)
+        self.collider_positions = wp.clone(self.collider_local_positions)
+        self.collider_velocities = wp.zeros_like(self.collider_local_positions)
         self._body_com = model.body_com
         self._zero_body_qd = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=self.device)
+
+        cloth_triangles_np = np.asarray(model.tri_indices.numpy(), dtype=np.int32).reshape((-1, 3))
+        if cloth_triangles_np.shape != (model.tri_count, 3):
+            raise ValueError("model triangle topology must have shape [triangle_count, 3]")
+        if np.any(cloth_triangles_np < 0) or np.any(cloth_triangles_np >= model.particle_count):
+            raise ValueError("model triangle topology contains an invalid particle index")
+        self.cloth_triangles = wp.array(cloth_triangles_np, dtype=wp.int32, device=self.device)
+        self.cloth_triangle_count = len(cloth_triangles_np)
+        self.collider_triangle_count = len(triangles_np)
+        self.cloth_triangle_lower_bounds = wp.empty(self.cloth_triangle_count, dtype=wp.vec3, device=self.device)
+        self.cloth_triangle_upper_bounds = wp.empty_like(self.cloth_triangle_lower_bounds)
+        self.collider_triangle_lower_bounds = wp.empty(self.collider_triangle_count, dtype=wp.vec3, device=self.device)
+        self.collider_triangle_upper_bounds = wp.empty_like(self.collider_triangle_lower_bounds)
+        self._update_triangle_bounds(model.particle_q)
+        self.cloth_triangle_bvh = wp.Bvh(self.cloth_triangle_lower_bounds, self.cloth_triangle_upper_bounds)
+        self.collider_triangle_bvh = wp.Bvh(self.collider_triangle_lower_bounds, self.collider_triangle_upper_bounds)
+        self.cloth_vertex_face_contacts = _KinematicContactBuffer(1, max_contacts, self.particle_count, self.device)
+        self.rigid_vertex_face_contacts = _KinematicContactBuffer(3, max_contacts, self.particle_count, self.device)
+        self._velocities: wp.array[wp.vec3] | None = None
+        self._anchor_positions: wp.array[wp.vec3] | None = None
+        if self.friction > 0.0:
+            self._anchor_positions = wp.empty_like(model.particle_q)
+        self._dt = 0.0
+        self._colliders_updated = False
 
     def update_colliders(
         self,
@@ -538,3 +565,194 @@ class ConstraintKinematicMeshContact:
             outputs=[self.collider_positions, self.collider_velocities],
             device=self.device,
         )
+        self._colliders_updated = True
+
+    def begin_step(
+        self,
+        positions: wp.array[wp.vec3],
+        velocities: wp.array[wp.vec3],
+        dt: float,
+    ) -> None:
+        """Cache step-start cloth state for damping and friction.
+
+        Args:
+            positions: Step-start cloth positions [m].
+            velocities: Step-start cloth velocities [m/s].
+            dt: Simulation time step [s].
+        """
+        self._validate_particle_vectors((positions, "positions"), (velocities, "velocities"))
+        if not np.isfinite(dt) or dt <= 0.0:
+            raise ValueError("dt must be finite and positive")
+        self._velocities = velocities
+        self._dt = float(dt)
+        if self._anchor_positions is not None:
+            self._anchor_positions.assign(positions)
+
+    def prepare(self, positions: wp.array[wp.vec3]) -> None:
+        """Detect and freeze cross-surface VF contacts."""
+        self._validate_particle_vectors((positions, "positions"))
+        if self._velocities is None or self._dt <= 0.0:
+            raise RuntimeError("begin_step() must be called before prepare()")
+        if not self._colliders_updated:
+            raise RuntimeError("update_colliders() must be called before prepare()")
+
+        self._update_triangle_bounds(positions)
+        self.cloth_triangle_bvh.refit()
+        self.collider_triangle_bvh.refit()
+        self.cloth_vertex_face_contacts.clear()
+        self.rigid_vertex_face_contacts.clear()
+        wp.launch(
+            detect_cloth_vertex_rigid_face,
+            dim=self.particle_count,
+            inputs=[
+                self.collider_triangle_bvh.id,
+                self.thickness,
+                self.max_contacts,
+                positions,
+                self.collider_positions,
+                self.collider_velocities,
+                self.collider_triangles,
+            ],
+            outputs=[
+                self.cloth_vertex_face_contacts.ids,
+                self.cloth_vertex_face_contacts.weights,
+                self.cloth_vertex_face_contacts.directions,
+                self.cloth_vertex_face_contacts.depths,
+                self.cloth_vertex_face_contacts.rigid_velocities,
+                self.cloth_vertex_face_contacts.count,
+                self.cloth_vertex_face_contacts.overflow_count,
+            ],
+            device=self.device,
+        )
+        wp.launch(
+            detect_rigid_vertex_cloth_face,
+            dim=len(self.collider_positions),
+            inputs=[
+                self.cloth_triangle_bvh.id,
+                self.thickness,
+                self.max_contacts,
+                positions,
+                self.cloth_triangles,
+                self.collider_positions,
+                self.collider_velocities,
+            ],
+            outputs=[
+                self.rigid_vertex_face_contacts.ids,
+                self.rigid_vertex_face_contacts.weights,
+                self.rigid_vertex_face_contacts.directions,
+                self.rigid_vertex_face_contacts.depths,
+                self.rigid_vertex_face_contacts.rigid_velocities,
+                self.rigid_vertex_face_contacts.count,
+                self.rigid_vertex_face_contacts.overflow_count,
+            ],
+            device=self.device,
+        )
+
+    def accumulate_force(self, positions: wp.array[wp.vec3], output: wp.array[wp.vec3]) -> None:
+        """Add cached normal, damping, and friction forces."""
+        self._validate_particle_vectors((positions, "positions"), (output, "output"))
+        velocities = self._step_velocities()
+        for contacts in self._vf_contact_buffers():
+            contacts.accumulate_force(self.stiffness, output)
+            if self.normal_damping > 0.0:
+                contacts.accumulate_damping_force(self.normal_damping, self._dt, velocities, output)
+            if self.friction > 0.0:
+                contacts.accumulate_friction_force(
+                    self.stiffness,
+                    self.friction,
+                    self.friction_epsilon,
+                    self._dt,
+                    positions,
+                    self._friction_anchors(),
+                    output,
+                )
+
+    def hessian_multiply(
+        self,
+        positions: wp.array[wp.vec3],
+        vector: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add cached normal, damping, and friction Hessian-vector products."""
+        self._validate_particle_vectors(
+            (positions, "positions"),
+            (vector, "vector"),
+            (output, "output"),
+        )
+        velocities = self._step_velocities()
+        for contacts in self._vf_contact_buffers():
+            contacts.hessian_multiply(self.stiffness, vector, output)
+            if self.normal_damping > 0.0:
+                contacts.damping_hessian_multiply(
+                    self.normal_damping,
+                    self._dt,
+                    velocities,
+                    vector,
+                    output,
+                )
+            if self.friction > 0.0:
+                contacts.friction_hessian_multiply(
+                    self.stiffness,
+                    self.friction,
+                    self.friction_epsilon,
+                    self._dt,
+                    positions,
+                    self._friction_anchors(),
+                    vector,
+                    output,
+                )
+
+    def accumulate_diagonal(self, positions: wp.array[wp.vec3], output: wp.array[wp.mat33]) -> None:
+        """Add cached normal, damping, and friction diagonal Hessian blocks."""
+        self._validate_particle_vectors((positions, "positions"))
+        if output.device != self.device or output.dtype != wp.mat33 or len(output) != self.particle_count:
+            raise ValueError(f"output must contain {self.particle_count} wp.mat33 values on {self.device}")
+        velocities = self._step_velocities()
+        for contacts in self._vf_contact_buffers():
+            contacts.accumulate_diagonal(self.stiffness, output)
+            if self.normal_damping > 0.0:
+                contacts.accumulate_damping_diagonal(self.normal_damping, self._dt, velocities, output)
+            if self.friction > 0.0:
+                contacts.accumulate_friction_diagonal(
+                    self.stiffness,
+                    self.friction,
+                    self.friction_epsilon,
+                    self._dt,
+                    positions,
+                    self._friction_anchors(),
+                    output,
+                )
+
+    def _update_triangle_bounds(self, cloth_positions: wp.array[wp.vec3]) -> None:
+        wp.launch(
+            update_triangle_bounds,
+            dim=self.cloth_triangle_count,
+            inputs=[cloth_positions, self.cloth_triangles],
+            outputs=[self.cloth_triangle_lower_bounds, self.cloth_triangle_upper_bounds],
+            device=self.device,
+        )
+        wp.launch(
+            update_triangle_bounds,
+            dim=self.collider_triangle_count,
+            inputs=[self.collider_positions, self.collider_triangles],
+            outputs=[self.collider_triangle_lower_bounds, self.collider_triangle_upper_bounds],
+            device=self.device,
+        )
+
+    def _vf_contact_buffers(self) -> tuple[_KinematicContactBuffer, _KinematicContactBuffer]:
+        return self.cloth_vertex_face_contacts, self.rigid_vertex_face_contacts
+
+    def _step_velocities(self) -> wp.array[wp.vec3]:
+        if self._velocities is None:
+            raise RuntimeError("begin_step() must be called before contact evaluation")
+        return self._velocities
+
+    def _friction_anchors(self) -> wp.array[wp.vec3]:
+        if self._anchor_positions is None:
+            raise RuntimeError("friction anchor storage is unavailable")
+        return self._anchor_positions
+
+    def _validate_particle_vectors(self, *arrays: tuple[wp.array[wp.vec3], str]) -> None:
+        for array, name in arrays:
+            if array.device != self.device or array.dtype != wp.vec3 or len(array) != self.particle_count:
+                raise ValueError(f"{name} must contain {self.particle_count} wp.vec3 values on {self.device}")
