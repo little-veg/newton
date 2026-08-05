@@ -30,7 +30,9 @@ class TestClothLimxFrankaDrop(unittest.TestCase):
         }
         self.assertEqual(example.model.particle_count, 441)
         self.assertTrue(np.all((flags & int(newton.ParticleFlags.ACTIVE)) != 0))
-        self.assertTrue(all(int(example.model.shape_body.numpy()[shape]) >= 0 for shape in example.collider_shape_indices))
+        self.assertTrue(
+            all(int(example.model.shape_body.numpy()[shape]) >= 0 for shape in example.collider_shape_indices)
+        )
         self.assertTrue(any(label.endswith("fr3_hand") for label in collider_bodies))
         self.assertTrue(any(label.endswith("fr3_leftfinger") for label in collider_bodies))
         self.assertTrue(any(label.endswith("fr3_rightfinger") for label in collider_bodies))

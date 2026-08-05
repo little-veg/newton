@@ -12,8 +12,8 @@ import newton
 import newton.examples
 import newton.utils
 
-FPS = 60
-SIM_SUBSTEPS = 10
+FPS = 100
+SIM_SUBSTEPS = 1
 CLOTH_GRID_CELLS = 20
 CLOTH_WIDTH = 0.4
 CLOTH_CENTER = (0.0, -0.5)
@@ -172,9 +172,7 @@ class Example:
             friction_epsilon=1.0e-2,
             max_contacts=65536,
         )
-        dynamic_constraints = newton.solvers.ConstraintGroupDynamic(
-            [self.self_collision, self.kinematic_contact]
-        )
+        dynamic_constraints = newton.solvers.ConstraintGroupDynamic([self.self_collision, self.kinematic_contact])
         self.solver = newton.solvers.SolverLIMX(
             self.model,
             static_constraints,
@@ -237,12 +235,8 @@ class Example:
         for name, contacts in contact_buffers:
             attempted = int(contacts.count.numpy()[0])
             retained = min(attempted, contacts.capacity)
-            self.maximum_attempted_contact_counts[name] = max(
-                self.maximum_attempted_contact_counts[name], attempted
-            )
-            self.maximum_retained_contact_counts[name] = max(
-                self.maximum_retained_contact_counts[name], retained
-            )
+            self.maximum_attempted_contact_counts[name] = max(self.maximum_attempted_contact_counts[name], attempted)
+            self.maximum_retained_contact_counts[name] = max(self.maximum_retained_contact_counts[name], retained)
             contact_count += retained
             overflow_count += int(contacts.overflow_count.numpy()[0])
             if retained > 0:
@@ -311,6 +305,6 @@ class Example:
 
 if __name__ == "__main__":
     parser = newton.examples.create_parser()
-    parser.set_defaults(num_frames=360)
+    parser.set_defaults(num_frames=600)
     viewer, args = newton.examples.init(parser)
     newton.examples.run(Example(viewer, args), args)
