@@ -613,6 +613,7 @@ class ConstraintKinematicMeshContact:
         shape_bodies = model.shape_body.numpy()
         local_positions: list[np.ndarray] = []
         triangles: list[np.ndarray] = []
+        triangle_one_sided: list[np.ndarray] = []
         bodies: list[np.ndarray] = []
         vertex_offset = 0
 
@@ -640,17 +641,20 @@ class ConstraintKinematicMeshContact:
             transformed = _transform_points(vertices, shape_transforms[shape]).astype(np.float32)
             local_positions.append(transformed)
             triangles.append(shape_triangles + vertex_offset)
+            triangle_one_sided.append(np.full(len(shape_triangles), int(shape_type == GeoType.BOX), dtype=np.int32))
             bodies.append(np.full(len(vertices), int(shape_bodies[shape]), dtype=np.int32))
             vertex_offset += len(vertices)
 
         local_positions_np = np.concatenate(local_positions, axis=0)
         triangles_np = np.concatenate(triangles, axis=0)
+        triangle_one_sided_np = np.concatenate(triangle_one_sided, axis=0)
         bodies_np = np.concatenate(bodies, axis=0)
         edges_np = MeshAdjacency(triangles_np).edge_indices.astype(np.int32)
 
         self.collider_local_positions = wp.array(local_positions_np, dtype=wp.vec3, device=self.device)
         self.collider_body = wp.array(bodies_np, dtype=wp.int32, device=self.device)
         self.collider_triangles = wp.array(triangles_np, dtype=wp.int32, device=self.device)
+        self.collider_triangle_one_sided = wp.array(triangle_one_sided_np, dtype=wp.int32, device=self.device)
         self.collider_edges = wp.array(edges_np, dtype=wp.int32, device=self.device)
         self.collider_positions = wp.clone(self.collider_local_positions)
         self.collider_velocities = wp.zeros_like(self.collider_local_positions)
@@ -717,6 +721,9 @@ class ConstraintKinematicMeshContact:
         if len(body_q) != len(self._body_com) or len(velocities) != len(self._body_com):
             raise ValueError("rigid state arrays must match the model body count")
 
+        was_updated = self._colliders_updated
+        if was_updated:
+            self._step_collider_positions.assign(self.collider_positions)
         wp.launch(
             _update_collider_vertices,
             dim=len(self.collider_local_positions),
@@ -730,6 +737,8 @@ class ConstraintKinematicMeshContact:
             outputs=[self.collider_positions, self.collider_velocities],
             device=self.device,
         )
+        if not was_updated:
+            self._step_collider_positions.assign(self.collider_positions)
         self._colliders_updated = True
 
     def begin_step(
@@ -751,7 +760,6 @@ class ConstraintKinematicMeshContact:
         self._velocities = velocities
         self._dt = float(dt)
         self._step_positions.assign(positions)
-        self._step_collider_positions.assign(self.collider_positions)
         wp.launch(
             predict_positions,
             dim=self.particle_count,
@@ -800,6 +808,7 @@ class ConstraintKinematicMeshContact:
                 self._predicted_collider_positions,
                 self.collider_velocities,
                 self.collider_triangles,
+                self.collider_triangle_one_sided,
             ],
             outputs=[
                 self.cloth_vertex_face_contacts.ids,

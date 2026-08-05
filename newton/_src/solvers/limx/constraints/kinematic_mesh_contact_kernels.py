@@ -163,6 +163,7 @@ def detect_cloth_vertex_rigid_face(
     rigid_predicted_positions: wp.array[wp.vec3],
     rigid_velocities: wp.array[wp.vec3],
     rigid_triangles: wp.array2d[int],
+    rigid_triangle_one_sided: wp.array[int],
     contact_ids: wp.array2d[int],
     contact_weights: wp.array2d[float],
     contact_directions: wp.array[wp.vec3],
@@ -204,9 +205,10 @@ def detect_cloth_vertex_rigid_face(
         step_normal = step_normal_raw / step_normal_length
         if wp.dot(normal, step_normal) < 0.0:
             normal = -normal
-        step_signed_distance = wp.dot(vertex_step_position - step_position_0, step_normal)
-        if step_signed_distance < 0.0:
-            normal = -normal
+        if rigid_triangle_one_sided[triangle] == 0:
+            step_signed_distance = wp.dot(vertex_step_position - step_position_0, step_normal)
+            if step_signed_distance < 0.0:
+                normal = -normal
         signed_gap = wp.dot(vertex_position - position_0, normal)
         predicted_signed_gap = wp.dot(vertex_predicted_position - predicted_position_0, normal)
         if signed_gap >= thickness and predicted_signed_gap >= thickness:

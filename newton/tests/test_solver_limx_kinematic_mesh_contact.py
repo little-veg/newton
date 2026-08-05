@@ -519,6 +519,66 @@ class TestConstraintKinematicMeshVF(unittest.TestCase):
         self.assertGreater(float(contacts.depths.numpy()[0]), constraint.thickness)
         np.testing.assert_allclose(contacts.directions.numpy()[0], (0.0, 0.0, 1.0), atol=1.0e-6)
 
+    def test_keeps_cloth_on_previous_side_of_moving_rigid_face(self):
+        """Keep cloth on its previous side when a rigid face moves across it."""
+        constraint, state = self._make_vf_fixture(
+            cloth_positions=((0.0, 0.0, 0.01), (10.0, 0.0, 1.0), (0.0, 10.0, 1.0)),
+            rigid_vertices=((-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (0.0, 1.0, 0.0)),
+            dt=0.01,
+            prepare=False,
+        )
+        body_q = state.body_q.numpy()
+        body_q[0, 2] = 0.02
+        state.body_q.assign(body_q)
+
+        constraint.update_colliders(state.body_q, state.body_qd)
+        constraint.begin_step(state.particle_q, state.particle_qd, 0.01)
+        constraint.prepare(state.particle_q)
+        contacts = constraint.cloth_vertex_face_contacts
+
+        self.assertGreaterEqual(int(contacts.count.numpy()[0]), 1)
+        np.testing.assert_allclose(contacts.directions.numpy()[0], (0.0, 0.0, 1.0), atol=1.0e-6)
+        self.assertGreater(float(contacts.depths.numpy()[0]), constraint.thickness)
+
+    def test_pushes_cloth_outward_from_inside_box_face(self):
+        """Push a cloth vertex outward when it starts inside a box face."""
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        shape = builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1)
+        cloth_positions = ((0.0, 0.0, 0.099), (10.0, 0.0, 1.0), (0.0, 10.0, 1.0))
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in cloth_positions],
+            vel=[wp.vec3(0.0)] * 3,
+            mass=[1.0] * 3,
+            radius=[0.003] * 3,
+        )
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=self.device)
+        state = model.state()
+        constraint = newton.solvers.ConstraintKinematicMeshContact(
+            model=model,
+            shape_indices=[shape],
+            thickness=0.003,
+            stiffness=2.0e4,
+            normal_damping=0.5,
+            friction=0.0,
+            friction_epsilon=1.0e-2,
+            max_contacts=64,
+        )
+        constraint.update_colliders(state.body_q, state.body_qd)
+        constraint.begin_step(state.particle_q, state.particle_qd, 0.01)
+
+        constraint.prepare(state.particle_q)
+        contacts = constraint.cloth_vertex_face_contacts
+        count = min(int(contacts.count.numpy()[0]), contacts.capacity)
+        ids = contacts.ids.numpy()[:count, 0]
+        directions = contacts.directions.numpy()[:count]
+        depths = contacts.depths.numpy()[:count]
+        vertex_contacts = (ids == 0) & (directions[:, 2] > 0.9)
+
+        self.assertTrue(np.any(vertex_contacts))
+        self.assertGreater(float(depths[vertex_contacts].max()), constraint.thickness)
+
     def test_detects_cloth_vertex_against_rigid_face(self):
         """Detect an interior cloth-vertex/rigid-face contact."""
         constraint, _state = self._make_vf_fixture(
