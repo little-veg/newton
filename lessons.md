@@ -41,3 +41,21 @@
 - Context: Designing kinematic Franka triangle-mesh contact for LIMX cloth using VF and EE stencils.
 - Mistake: Described applying contact force to the cloth without explicitly requiring the corresponding Hessian operations used by LIMX's Newton solve.
 - Rule: Every new LIMX contact constraint must define consistent force, matrix-free Hessian-vector product, and diagonal Hessian blocks. For a kinematic collider, differentiate only with respect to cloth unknowns while retaining the rigid stencil geometry in the residual and derivatives.
+
+## 2026-08-05 — Keep interactive cloth diagnostics off the frame-critical path
+
+- Context: Running the LIMX Franka cloth-drop example in the OpenGL viewer.
+- Mistake: Collected contact counters, depths, and particle RMS velocity with several synchronous `.numpy()` readbacks after every rendered frame, making an otherwise acceptable visual demo feel choppy.
+- Rule: Keep simulation diagnostics on device or sample them only in test/diagnostic mode. Interactive examples must not add per-frame device-to-host synchronization solely for acceptance metrics.
+
+## 2026-08-05 — Use the requested 0.01 s cloth step directly
+
+- Context: The LIMX Franka cloth-drop example felt choppy while configured as 60 FPS with ten solver substeps.
+- Mistake: Used ten 1/600 s substeps and started tuning PCG work, even though the intended setup was one 0.01 s simulation step per 100 Hz frame. Profiling also showed diagnostic readback was secondary to the unnecessary substep workload.
+- Rule: For this LIMX rigid-cloth scene, start with `dt = 0.01 s` and no substepping. Do not add substeps unless a measured collision or convergence failure demonstrates that they are required.
+
+## 2026-08-05 — Verify rigid-cloth separation geometrically
+
+- Context: The LIMX Franka cloth-drop scene reported retained contacts and no overflow, but the rendered cloth visibly penetrated both gripper fingers.
+- Mistake: Treated contact counts, barrier depth, and a stable final velocity as sufficient evidence that rigid-cloth collision was correct.
+- Rule: Validate rigid-cloth scenes with direct cloth-to-collider geometric separation or signed-side-crossing measurements for every relevant rigid link. Contact counters and solver stability are supporting diagnostics, not proof that penetration did not occur.
