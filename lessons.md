@@ -23,3 +23,21 @@
 - Context: The user asked whether there was a cloth demo after discussing Isaac Sim integration.
 - Mistake: Launched Newton's standalone OpenGL cloth example instead of checking for a demo inside the full Isaac Sim GUI.
 - Rule: When the active workflow is Isaac Sim and the user asks to run or show a demo, default to the Isaac Sim GUI context. Clearly distinguish standalone Newton examples from Isaac Sim-integrated examples before launching anything.
+
+## 2026-08-05 — Distinguish proposed LIMX contact from Newton's existing rigid-soft path
+
+- Context: Choosing a collision method for a Franka gripper interacting with LIMX cloth.
+- Mistake: Recommended an IPC-style rigid proxy surface formulation without first stating that Newton's existing rigid-soft collision pipeline uses analytic/SDF-style shape distance queries and contact records.
+- Rule: Before proposing rigid-soft contact for LIMX, inspect and describe Newton's current `CollisionPipeline` shape-query path first. Clearly label any IPC VF/EE extension as a new design rather than existing Newton behavior.
+
+## 2026-08-05 — Preserve the requested VF/EE rigid-cloth direction
+
+- Context: Discussing how the Franka mesh should collide with LIMX cloth after the user explicitly chose vertex-face and edge-edge contact.
+- Mistake: Replaced the requested VF/EE design with Newton's existing SDF rigid-soft path instead of answering whether reusable open-source VF/EE code had been found.
+- Rule: Treat an explicitly selected collision representation as a fixed requirement. Investigate and cite its concrete implementation source before recommending a different representation; distinguish existing local code, externally reusable code, and a proposed extension.
+
+## 2026-08-05 — Treat LIMX contact as a complete second-order operator
+
+- Context: Designing kinematic Franka triangle-mesh contact for LIMX cloth using VF and EE stencils.
+- Mistake: Described applying contact force to the cloth without explicitly requiring the corresponding Hessian operations used by LIMX's Newton solve.
+- Rule: Every new LIMX contact constraint must define consistent force, matrix-free Hessian-vector product, and diagonal Hessian blocks. For a kinematic collider, differentiate only with respect to cloth unknowns while retaining the rigid stencil geometry in the residual and derivatives.
