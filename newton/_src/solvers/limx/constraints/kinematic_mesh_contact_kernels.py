@@ -51,6 +51,70 @@ def update_triangle_bounds(
 
 
 @wp.kernel
+def predict_positions(
+    positions: wp.array[wp.vec3],
+    velocities: wp.array[wp.vec3],
+    dt: float,
+    predicted: wp.array[wp.vec3],
+):
+    index = wp.tid()
+    predicted[index] = positions[index] + dt * velocities[index]
+
+
+@wp.kernel
+def update_swept_triangle_bounds(
+    step_positions: wp.array[wp.vec3],
+    predicted_positions: wp.array[wp.vec3],
+    current_positions: wp.array[wp.vec3],
+    triangles: wp.array2d[int],
+    lower_bounds: wp.array[wp.vec3],
+    upper_bounds: wp.array[wp.vec3],
+):
+    triangle = wp.tid()
+    index_0 = triangles[triangle, 0]
+    index_1 = triangles[triangle, 1]
+    index_2 = triangles[triangle, 2]
+    lower = wp.min(
+        wp.min(step_positions[index_0], step_positions[index_1]),
+        step_positions[index_2],
+    )
+    upper = wp.max(
+        wp.max(step_positions[index_0], step_positions[index_1]),
+        step_positions[index_2],
+    )
+    lower = wp.min(
+        lower,
+        wp.min(
+            wp.min(predicted_positions[index_0], predicted_positions[index_1]),
+            predicted_positions[index_2],
+        ),
+    )
+    upper = wp.max(
+        upper,
+        wp.max(
+            wp.max(predicted_positions[index_0], predicted_positions[index_1]),
+            predicted_positions[index_2],
+        ),
+    )
+    lower = wp.min(
+        lower,
+        wp.min(
+            wp.min(current_positions[index_0], current_positions[index_1]),
+            current_positions[index_2],
+        ),
+    )
+    upper = wp.max(
+        upper,
+        wp.max(
+            wp.max(current_positions[index_0], current_positions[index_1]),
+            current_positions[index_2],
+        ),
+    )
+    lower_bounds[triangle] = lower
+    upper_bounds[triangle] = upper
+
+
+@wp.kernel
 def update_edge_bounds(
     positions: wp.array[wp.vec3],
     edges: wp.array2d[int],
@@ -65,12 +129,38 @@ def update_edge_bounds(
 
 
 @wp.kernel
+def update_swept_edge_bounds(
+    step_positions: wp.array[wp.vec3],
+    predicted_positions: wp.array[wp.vec3],
+    current_positions: wp.array[wp.vec3],
+    edges: wp.array2d[int],
+    lower_bounds: wp.array[wp.vec3],
+    upper_bounds: wp.array[wp.vec3],
+):
+    edge = wp.tid()
+    index_0 = edges[edge, 2]
+    index_1 = edges[edge, 3]
+    lower = wp.min(step_positions[index_0], step_positions[index_1])
+    upper = wp.max(step_positions[index_0], step_positions[index_1])
+    lower = wp.min(lower, wp.min(predicted_positions[index_0], predicted_positions[index_1]))
+    upper = wp.max(upper, wp.max(predicted_positions[index_0], predicted_positions[index_1]))
+    lower = wp.min(lower, wp.min(current_positions[index_0], current_positions[index_1]))
+    upper = wp.max(upper, wp.max(current_positions[index_0], current_positions[index_1]))
+    lower_bounds[edge] = lower
+    upper_bounds[edge] = upper
+
+
+@wp.kernel
 def detect_cloth_vertex_rigid_face(
     rigid_triangle_bvh_id: wp.uint64,
     thickness: float,
     capacity: int,
     cloth_positions: wp.array[wp.vec3],
+    cloth_step_positions: wp.array[wp.vec3],
+    cloth_predicted_positions: wp.array[wp.vec3],
     rigid_positions: wp.array[wp.vec3],
+    rigid_step_positions: wp.array[wp.vec3],
+    rigid_predicted_positions: wp.array[wp.vec3],
     rigid_velocities: wp.array[wp.vec3],
     rigid_triangles: wp.array2d[int],
     contact_ids: wp.array2d[int],
@@ -83,10 +173,12 @@ def detect_cloth_vertex_rigid_face(
 ):
     vertex = wp.tid()
     vertex_position = cloth_positions[vertex]
+    vertex_step_position = cloth_step_positions[vertex]
+    vertex_predicted_position = cloth_predicted_positions[vertex]
     query = wp.bvh_query_aabb(
         rigid_triangle_bvh_id,
-        vertex_position - wp.vec3(thickness),
-        vertex_position + wp.vec3(thickness),
+        wp.min(wp.min(vertex_position, vertex_step_position), vertex_predicted_position) - wp.vec3(thickness),
+        wp.max(wp.max(vertex_position, vertex_step_position), vertex_predicted_position) + wp.vec3(thickness),
     )
     triangle = wp.int32(-1)
     while wp.bvh_query_next(query, triangle):
@@ -96,26 +188,51 @@ def detect_cloth_vertex_rigid_face(
         position_0 = rigid_positions[index_0]
         position_1 = rigid_positions[index_1]
         position_2 = rigid_positions[index_2]
+        step_position_0 = rigid_step_positions[index_0]
+        step_position_1 = rigid_step_positions[index_1]
+        step_position_2 = rigid_step_positions[index_2]
+        predicted_position_0 = rigid_predicted_positions[index_0]
+        predicted_position_1 = rigid_predicted_positions[index_1]
+        predicted_position_2 = rigid_predicted_positions[index_2]
         normal_raw = wp.cross(position_1 - position_0, position_2 - position_0)
+        step_normal_raw = wp.cross(step_position_1 - step_position_0, step_position_2 - step_position_0)
         normal_length = wp.length(normal_raw)
-        if normal_length <= _MIN_GEOMETRY_NORM:
+        step_normal_length = wp.length(step_normal_raw)
+        if normal_length <= _MIN_GEOMETRY_NORM or step_normal_length <= _MIN_GEOMETRY_NORM:
             continue
         normal = normal_raw / normal_length
-        signed_distance = wp.dot(vertex_position - position_0, normal)
-        distance = wp.abs(signed_distance)
-        if distance <= _MIN_CONTACT_DISTANCE or distance >= thickness:
+        step_normal = step_normal_raw / step_normal_length
+        if wp.dot(normal, step_normal) < 0.0:
+            normal = -normal
+        step_signed_distance = wp.dot(vertex_step_position - step_position_0, step_normal)
+        if step_signed_distance < 0.0:
+            normal = -normal
+        signed_gap = wp.dot(vertex_position - position_0, normal)
+        predicted_signed_gap = wp.dot(vertex_predicted_position - predicted_position_0, normal)
+        if signed_gap >= thickness and predicted_signed_gap >= thickness:
             continue
-        projected = vertex_position - signed_distance * normal
+        projected = vertex_position - signed_gap * normal
         barycentric = _triangle_barycentric(position_0, position_1, position_2, projected)
-        if barycentric[0] < 0.0 or barycentric[1] < 0.0 or barycentric[2] < 0.0:
+        predicted_projected = vertex_predicted_position - predicted_signed_gap * normal
+        predicted_barycentric = _triangle_barycentric(
+            predicted_position_0,
+            predicted_position_1,
+            predicted_position_2,
+            predicted_projected,
+        )
+        current_inside = barycentric[0] >= 0.0 and barycentric[1] >= 0.0 and barycentric[2] >= 0.0
+        predicted_inside = (
+            predicted_barycentric[0] >= 0.0 and predicted_barycentric[1] >= 0.0 and predicted_barycentric[2] >= 0.0
+        )
+        if not current_inside and not predicted_inside:
             continue
+        if not current_inside:
+            barycentric = predicted_barycentric
 
         contact = wp.atomic_add(contact_count, 0, 1)
         if contact >= capacity:
             wp.atomic_add(overflow_count, 0, 1)
             continue
-        if signed_distance < 0.0:
-            normal = -normal
         rigid_velocity = (
             barycentric[0] * rigid_velocities[index_0]
             + barycentric[1] * rigid_velocities[index_1]
@@ -124,7 +241,7 @@ def detect_cloth_vertex_rigid_face(
         contact_ids[contact, 0] = vertex
         contact_weights[contact, 0] = 1.0
         contact_directions[contact] = normal
-        contact_depths[contact] = thickness - distance
+        contact_depths[contact] = thickness - signed_gap
         contact_rigid_velocities[contact] = -rigid_velocity
 
 
@@ -134,8 +251,12 @@ def detect_rigid_vertex_cloth_face(
     thickness: float,
     capacity: int,
     cloth_positions: wp.array[wp.vec3],
+    cloth_step_positions: wp.array[wp.vec3],
+    cloth_predicted_positions: wp.array[wp.vec3],
     cloth_triangles: wp.array2d[int],
     rigid_positions: wp.array[wp.vec3],
+    rigid_step_positions: wp.array[wp.vec3],
+    rigid_predicted_positions: wp.array[wp.vec3],
     rigid_velocities: wp.array[wp.vec3],
     contact_ids: wp.array2d[int],
     contact_weights: wp.array2d[float],
@@ -147,10 +268,12 @@ def detect_rigid_vertex_cloth_face(
 ):
     rigid_vertex = wp.tid()
     rigid_position = rigid_positions[rigid_vertex]
+    rigid_step_position = rigid_step_positions[rigid_vertex]
+    rigid_predicted_position = rigid_predicted_positions[rigid_vertex]
     query = wp.bvh_query_aabb(
         cloth_triangle_bvh_id,
-        rigid_position - wp.vec3(thickness),
-        rigid_position + wp.vec3(thickness),
+        wp.min(wp.min(rigid_position, rigid_step_position), rigid_predicted_position) - wp.vec3(thickness),
+        wp.max(wp.max(rigid_position, rigid_step_position), rigid_predicted_position) + wp.vec3(thickness),
     )
     triangle = wp.int32(-1)
     while wp.bvh_query_next(query, triangle):
@@ -160,26 +283,51 @@ def detect_rigid_vertex_cloth_face(
         position_0 = cloth_positions[index_0]
         position_1 = cloth_positions[index_1]
         position_2 = cloth_positions[index_2]
+        step_position_0 = cloth_step_positions[index_0]
+        step_position_1 = cloth_step_positions[index_1]
+        step_position_2 = cloth_step_positions[index_2]
+        predicted_position_0 = cloth_predicted_positions[index_0]
+        predicted_position_1 = cloth_predicted_positions[index_1]
+        predicted_position_2 = cloth_predicted_positions[index_2]
         normal_raw = wp.cross(position_1 - position_0, position_2 - position_0)
+        step_normal_raw = wp.cross(step_position_1 - step_position_0, step_position_2 - step_position_0)
         normal_length = wp.length(normal_raw)
-        if normal_length <= _MIN_GEOMETRY_NORM:
+        step_normal_length = wp.length(step_normal_raw)
+        if normal_length <= _MIN_GEOMETRY_NORM or step_normal_length <= _MIN_GEOMETRY_NORM:
             continue
         normal = normal_raw / normal_length
-        signed_distance = wp.dot(rigid_position - position_0, normal)
-        distance = wp.abs(signed_distance)
-        if distance <= _MIN_CONTACT_DISTANCE or distance >= thickness:
+        step_normal = step_normal_raw / step_normal_length
+        if wp.dot(normal, step_normal) < 0.0:
+            normal = -normal
+        step_signed_distance = wp.dot(rigid_step_position - step_position_0, step_normal)
+        if step_signed_distance < 0.0:
+            normal = -normal
+        signed_gap = wp.dot(rigid_position - position_0, normal)
+        predicted_signed_gap = wp.dot(rigid_predicted_position - predicted_position_0, normal)
+        if signed_gap >= thickness and predicted_signed_gap >= thickness:
             continue
-        projected = rigid_position - signed_distance * normal
+        projected = rigid_position - signed_gap * normal
         barycentric = _triangle_barycentric(position_0, position_1, position_2, projected)
-        if barycentric[0] < 0.0 or barycentric[1] < 0.0 or barycentric[2] < 0.0:
+        predicted_projected = rigid_predicted_position - predicted_signed_gap * normal
+        predicted_barycentric = _triangle_barycentric(
+            predicted_position_0,
+            predicted_position_1,
+            predicted_position_2,
+            predicted_projected,
+        )
+        current_inside = barycentric[0] >= 0.0 and barycentric[1] >= 0.0 and barycentric[2] >= 0.0
+        predicted_inside = (
+            predicted_barycentric[0] >= 0.0 and predicted_barycentric[1] >= 0.0 and predicted_barycentric[2] >= 0.0
+        )
+        if not current_inside and not predicted_inside:
             continue
+        if not current_inside:
+            barycentric = predicted_barycentric
 
         contact = wp.atomic_add(contact_count, 0, 1)
         if contact >= capacity:
             wp.atomic_add(overflow_count, 0, 1)
             continue
-        if signed_distance < 0.0:
-            normal = -normal
         contact_ids[contact, 0] = index_0
         contact_ids[contact, 1] = index_1
         contact_ids[contact, 2] = index_2
@@ -187,7 +335,7 @@ def detect_rigid_vertex_cloth_face(
         contact_weights[contact, 1] = -barycentric[1]
         contact_weights[contact, 2] = -barycentric[2]
         contact_directions[contact] = normal
-        contact_depths[contact] = thickness - distance
+        contact_depths[contact] = thickness - signed_gap
         contact_rigid_velocities[contact] = rigid_velocities[rigid_vertex]
 
 
@@ -592,6 +740,8 @@ def accumulate_contact_force(
     contact = wp.tid()
     if contact >= wp.min(count[0], capacity):
         return
+    if depths[contact] <= 0.0:
+        return
 
     force = stiffness * depths[contact] * load_scales[contact] * directions[contact]
     for local_index in range(arity):
@@ -604,6 +754,7 @@ def contact_hessian_multiply(
     ids: wp.array2d[int],
     weights: wp.array2d[float],
     directions: wp.array[wp.vec3],
+    depths: wp.array[float],
     load_scales: wp.array[float],
     count: wp.array[int],
     arity: int,
@@ -614,6 +765,8 @@ def contact_hessian_multiply(
 ):
     contact = wp.tid()
     if contact >= wp.min(count[0], capacity):
+        return
+    if depths[contact] <= 0.0:
         return
 
     direction = directions[contact]
@@ -633,6 +786,7 @@ def accumulate_contact_diagonal(
     ids: wp.array2d[int],
     weights: wp.array2d[float],
     directions: wp.array[wp.vec3],
+    depths: wp.array[float],
     load_scales: wp.array[float],
     count: wp.array[int],
     arity: int,
@@ -642,6 +796,8 @@ def accumulate_contact_diagonal(
 ):
     contact = wp.tid()
     if contact >= wp.min(count[0], capacity):
+        return
+    if depths[contact] <= 0.0:
         return
 
     rank_one = stiffness * load_scales[contact] * wp.outer(directions[contact], directions[contact])

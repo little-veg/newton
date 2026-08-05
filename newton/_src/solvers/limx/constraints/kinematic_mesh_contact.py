@@ -31,8 +31,11 @@ from .kinematic_mesh_contact_kernels import (
     detect_rigid_vertex_cloth_face,
     friction_hessian_multiply,
     mollified_edge_edge_hessian_multiply,
+    predict_positions,
     prepare_edge_edge_mollifier,
     update_edge_bounds,
+    update_swept_edge_bounds,
+    update_swept_triangle_bounds,
     update_triangle_bounds,
 )
 
@@ -100,6 +103,7 @@ class _KinematicContactBuffer:
                 self.ids,
                 self.weights,
                 self.directions,
+                self.depths,
                 self.load_scales,
                 self.count,
                 self.arity,
@@ -121,6 +125,7 @@ class _KinematicContactBuffer:
                 self.ids,
                 self.weights,
                 self.directions,
+                self.depths,
                 self.load_scales,
                 self.count,
                 self.arity,
@@ -649,6 +654,8 @@ class ConstraintKinematicMeshContact:
         self.collider_edges = wp.array(edges_np, dtype=wp.int32, device=self.device)
         self.collider_positions = wp.clone(self.collider_local_positions)
         self.collider_velocities = wp.zeros_like(self.collider_local_positions)
+        self._step_collider_positions = wp.clone(self.collider_positions)
+        self._predicted_collider_positions = wp.clone(self.collider_positions)
         self._body_com = model.body_com
         self._zero_body_qd = wp.zeros(model.body_count, dtype=wp.spatial_vector, device=self.device)
 
@@ -661,6 +668,8 @@ class ConstraintKinematicMeshContact:
         cloth_edges_np = MeshAdjacency(cloth_triangles_np).edge_indices.astype(np.int32)
         self.cloth_edges = wp.array(cloth_edges_np, dtype=wp.int32, device=self.device)
         self.cloth_rest_positions = wp.clone(model.particle_q)
+        self._step_positions = wp.clone(model.particle_q)
+        self._predicted_positions = wp.clone(model.particle_q)
         self.cloth_triangle_count = len(cloth_triangles_np)
         self.collider_triangle_count = len(triangles_np)
         self.cloth_edge_count = len(cloth_edges_np)
@@ -741,6 +750,22 @@ class ConstraintKinematicMeshContact:
             raise ValueError("dt must be finite and positive")
         self._velocities = velocities
         self._dt = float(dt)
+        self._step_positions.assign(positions)
+        self._step_collider_positions.assign(self.collider_positions)
+        wp.launch(
+            predict_positions,
+            dim=self.particle_count,
+            inputs=[positions, velocities, dt],
+            outputs=[self._predicted_positions],
+            device=self.device,
+        )
+        wp.launch(
+            predict_positions,
+            dim=len(self.collider_positions),
+            inputs=[self.collider_positions, self.collider_velocities, dt],
+            outputs=[self._predicted_collider_positions],
+            device=self.device,
+        )
         if self._anchor_positions is not None:
             self._anchor_positions.assign(positions)
 
@@ -752,8 +777,7 @@ class ConstraintKinematicMeshContact:
         if not self._colliders_updated:
             raise RuntimeError("update_colliders() must be called before prepare()")
 
-        self._update_triangle_bounds(positions)
-        self._update_edge_bounds(positions)
+        self._update_swept_bounds(positions)
         self.cloth_triangle_bvh.refit()
         self.collider_triangle_bvh.refit()
         self.cloth_edge_bvh.refit()
@@ -769,7 +793,11 @@ class ConstraintKinematicMeshContact:
                 self.thickness,
                 self.max_contacts,
                 positions,
+                self._step_positions,
+                self._predicted_positions,
                 self.collider_positions,
+                self._step_collider_positions,
+                self._predicted_collider_positions,
                 self.collider_velocities,
                 self.collider_triangles,
             ],
@@ -792,8 +820,12 @@ class ConstraintKinematicMeshContact:
                 self.thickness,
                 self.max_contacts,
                 positions,
+                self._step_positions,
+                self._predicted_positions,
                 self.cloth_triangles,
                 self.collider_positions,
+                self._step_collider_positions,
+                self._predicted_collider_positions,
                 self.collider_velocities,
             ],
             outputs=[
@@ -945,6 +977,46 @@ class ConstraintKinematicMeshContact:
             update_edge_bounds,
             dim=self.collider_edge_count,
             inputs=[self.collider_positions, self.collider_edges],
+            outputs=[self.collider_edge_lower_bounds, self.collider_edge_upper_bounds],
+            device=self.device,
+        )
+
+    def _update_swept_bounds(self, cloth_positions: wp.array[wp.vec3]) -> None:
+        wp.launch(
+            update_swept_triangle_bounds,
+            dim=self.cloth_triangle_count,
+            inputs=[self._step_positions, self._predicted_positions, cloth_positions, self.cloth_triangles],
+            outputs=[self.cloth_triangle_lower_bounds, self.cloth_triangle_upper_bounds],
+            device=self.device,
+        )
+        wp.launch(
+            update_swept_triangle_bounds,
+            dim=self.collider_triangle_count,
+            inputs=[
+                self._step_collider_positions,
+                self._predicted_collider_positions,
+                self.collider_positions,
+                self.collider_triangles,
+            ],
+            outputs=[self.collider_triangle_lower_bounds, self.collider_triangle_upper_bounds],
+            device=self.device,
+        )
+        wp.launch(
+            update_swept_edge_bounds,
+            dim=self.cloth_edge_count,
+            inputs=[self._step_positions, self._predicted_positions, cloth_positions, self.cloth_edges],
+            outputs=[self.cloth_edge_lower_bounds, self.cloth_edge_upper_bounds],
+            device=self.device,
+        )
+        wp.launch(
+            update_swept_edge_bounds,
+            dim=self.collider_edge_count,
+            inputs=[
+                self._step_collider_positions,
+                self._predicted_collider_positions,
+                self.collider_positions,
+                self.collider_edges,
+            ],
             outputs=[self.collider_edge_lower_bounds, self.collider_edge_upper_bounds],
             device=self.device,
         )

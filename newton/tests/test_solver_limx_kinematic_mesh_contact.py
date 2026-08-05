@@ -354,7 +354,14 @@ class TestConstraintKinematicMeshVF(unittest.TestCase):
     def setUpClass(cls):
         cls.device = wp.get_device("cuda:0")
 
-    def _make_vf_fixture(self, cloth_positions, rigid_vertices):
+    def _make_vf_fixture(
+        self,
+        cloth_positions,
+        rigid_vertices,
+        cloth_velocities=None,
+        dt=1.0 / 600.0,
+        prepare=True,
+    ):
         builder = newton.ModelBuilder()
         body = builder.add_body()
         rigid_mesh = newton.Mesh(
@@ -363,9 +370,10 @@ class TestConstraintKinematicMeshVF(unittest.TestCase):
             compute_inertia=False,
         )
         shape = builder.add_shape_mesh(body=body, mesh=rigid_mesh)
+        velocities = cloth_velocities if cloth_velocities is not None else [wp.vec3(0.0)] * 3
         builder.add_particles(
             pos=[wp.vec3(*position) for position in cloth_positions],
-            vel=[wp.vec3(0.0)] * 3,
+            vel=[wp.vec3(*velocity) for velocity in velocities],
             mass=[1.0] * 3,
             radius=[0.003] * 3,
         )
@@ -383,9 +391,85 @@ class TestConstraintKinematicMeshVF(unittest.TestCase):
             max_contacts=16,
         )
         constraint.update_colliders(state.body_q, state.body_qd)
-        constraint.begin_step(state.particle_q, state.particle_qd, 1.0 / 600.0)
-        constraint.prepare(state.particle_q)
+        constraint.begin_step(state.particle_q, state.particle_qd, dt)
+        if prepare:
+            constraint.prepare(state.particle_q)
         return constraint, state
+
+    def test_keeps_cloth_vertex_contact_on_step_start_side_after_crossing(self):
+        """Keep a swept cloth vertex on its step-start side of a rigid face."""
+        constraint, _state = self._make_vf_fixture(
+            cloth_positions=((0.0, 0.0, 0.01), (10.0, 0.0, 1.0), (0.0, 10.0, 1.0)),
+            rigid_vertices=((-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (0.0, 1.0, 0.0)),
+            cloth_velocities=((0.0, 0.0, -2.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)),
+            dt=0.01,
+            prepare=False,
+        )
+        crossed = wp.array(
+            ((0.0, 0.0, -0.01), (10.0, 0.0, 1.0), (0.0, 10.0, 1.0)),
+            dtype=wp.vec3,
+            device=self.device,
+        )
+
+        constraint.prepare(crossed)
+        contacts = constraint.cloth_vertex_face_contacts
+
+        self.assertGreaterEqual(int(contacts.count.numpy()[0]), 1)
+        np.testing.assert_allclose(contacts.directions.numpy()[0], (0.0, 0.0, 1.0), atol=1.0e-6)
+        self.assertGreater(float(contacts.depths.numpy()[0]), constraint.thickness)
+
+    def test_solver_stops_high_speed_cloth_face_crossing(self):
+        """Stop a fast cloth triangle from crossing a rigid face in one step."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = builder.add_body()
+        rigid_mesh = newton.Mesh(
+            vertices=np.asarray(((-1.0, -1.0, 0.0), (1.0, -1.0, 0.0), (0.0, 1.0, 0.0)), dtype=np.float32),
+            indices=np.asarray((0, 1, 2), dtype=np.int32),
+            compute_inertia=False,
+        )
+        shape = builder.add_shape_mesh(body=body, mesh=rigid_mesh)
+        cloth_positions = np.asarray(((-0.1, -0.1, 0.01), (0.1, -0.1, 0.01), (0.0, 0.1, 0.01)), dtype=np.float32)
+        cloth_triangles = np.asarray(((0, 1, 2),), dtype=np.int32)
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in cloth_positions],
+            vel=[wp.vec3(0.0, 0.0, -2.0)] * 3,
+            mass=[0.001] * 3,
+            radius=[0.003] * 3,
+        )
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=self.device)
+        state_0 = model.state()
+        state_1 = model.state()
+        contact = newton.solvers.ConstraintKinematicMeshContact(
+            model=model,
+            shape_indices=[shape],
+            thickness=0.003,
+            stiffness=2.0e4,
+            normal_damping=0.5,
+            friction=0.0,
+            friction_epsilon=1.0e-2,
+            max_contacts=64,
+        )
+        contact.update_colliders(state_0.body_q, state_0.body_qd)
+        elasticity = newton.solvers.ConstraintTriangleElastic(
+            triangle_indices=cloth_triangles,
+            inverse_rest_matrices=model.tri_poses.numpy(),
+            rest_areas=model.tri_areas.numpy(),
+            stiffnesses=[wp.vec3(1.0)] * len(cloth_triangles),
+            particle_count=model.particle_count,
+            device=model.device,
+        )
+        solver = newton.solvers.SolverLIMX(
+            model,
+            [elasticity],
+            nonlinear_iterations=2,
+            linear_iterations=50,
+            dynamic_operator=contact,
+        )
+
+        solver.step(state_0, state_1, model.control(), None, 0.01)
+
+        self.assertGreaterEqual(float(state_1.particle_q.numpy()[:, 2].min()), 0.0)
 
     def test_detects_cloth_vertex_against_rigid_face(self):
         """Detect an interior cloth-vertex/rigid-face contact."""
