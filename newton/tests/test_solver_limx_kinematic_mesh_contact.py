@@ -348,6 +348,32 @@ class TestKinematicEdgeEdgeContactBuffer(unittest.TestCase):
         np.testing.assert_allclose(friction_product.numpy(), expected_friction_product, atol=1.0e-6)
         np.testing.assert_allclose(friction_diagonal.numpy(), expected_friction_diagonal, atol=1.0e-6)
 
+    def test_inactive_predictive_contact_has_zero_normal_operator(self):
+        """Keep inactive predictive EE normal force and Hessian paths zero."""
+        positions_np = np.asarray(((-0.5, 0.0, 0.01), (0.5, 0.0, 0.01)), dtype=np.float32)
+        contacts = _KinematicEdgeEdgeContactBuffer(capacity=1, particle_count=2, device=self.device)
+        contacts.ids.assign(np.asarray([[0, 1]], dtype=np.int32))
+        contacts.weights.assign(np.asarray([[0.5, 0.5]], dtype=np.float32))
+        contacts.directions.assign(np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32))
+        contacts.depths.assign(np.asarray([-0.01], dtype=np.float32))
+        contacts.rigid_edge_vectors.assign(np.asarray([[0.0, 1.0, 0.0]], dtype=np.float32))
+        contacts.mollifier_thresholds.assign(np.asarray([1.0e-3], dtype=np.float32))
+        contacts.count.assign(np.asarray([1], dtype=np.int32))
+        positions = wp.array(positions_np, dtype=wp.vec3, device=self.device)
+        vector = wp.array([wp.vec3(0.0, 0.0, 1.0)] * 2, dtype=wp.vec3, device=self.device)
+        force = wp.zeros(2, dtype=wp.vec3, device=self.device)
+        product = wp.zeros_like(force)
+        diagonal = wp.zeros(2, dtype=wp.mat33, device=self.device)
+
+        contacts.prepare_hessian(positions)
+        contacts.accumulate_force(10.0, positions, force)
+        contacts.hessian_multiply(10.0, positions, vector, product)
+        contacts.accumulate_diagonal(10.0, positions, diagonal)
+
+        np.testing.assert_allclose(force.numpy(), 0.0, atol=0.0)
+        np.testing.assert_allclose(product.numpy(), 0.0, atol=0.0)
+        np.testing.assert_allclose(diagonal.numpy(), 0.0, atol=0.0)
+
 
 class TestConstraintKinematicMeshVF(unittest.TestCase):
     @classmethod
@@ -470,6 +496,28 @@ class TestConstraintKinematicMeshVF(unittest.TestCase):
         solver.step(state_0, state_1, model.control(), None, 0.01)
 
         self.assertGreaterEqual(float(state_1.particle_q.numpy()[:, 2].min()), 0.0)
+
+    def test_keeps_edge_contact_on_step_start_side_after_crossing(self):
+        """Keep a swept cloth edge on its step-start side of a rigid edge."""
+        constraint, _state = self._make_vf_fixture(
+            cloth_positions=((-0.5, 0.0, 0.01), (0.5, 0.0, 0.01), (-0.5, 0.0, 1.0)),
+            rigid_vertices=((0.0, -0.5, 0.0), (0.0, 0.5, 0.0), (0.0, -0.5, -1.0)),
+            cloth_velocities=((0.0, 0.0, -2.0), (0.0, 0.0, -2.0), (0.0, 0.0, 0.0)),
+            dt=0.01,
+            prepare=False,
+        )
+        crossed = wp.array(
+            ((-0.5, 0.0, -0.01), (0.5, 0.0, -0.01), (-0.5, 0.0, 1.0)),
+            dtype=wp.vec3,
+            device=self.device,
+        )
+
+        constraint.prepare(crossed)
+        contacts = constraint.edge_edge_contacts
+
+        self.assertGreaterEqual(int(contacts.count.numpy()[0]), 1)
+        self.assertGreater(float(contacts.depths.numpy()[0]), constraint.thickness)
+        np.testing.assert_allclose(contacts.directions.numpy()[0], (0.0, 0.0, 1.0), atol=1.0e-6)
 
     def test_detects_cloth_vertex_against_rigid_face(self):
         """Detect an interior cloth-vertex/rigid-face contact."""

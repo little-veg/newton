@@ -345,9 +345,13 @@ def detect_cloth_edge_rigid_edge(
     thickness: float,
     capacity: int,
     cloth_positions: wp.array[wp.vec3],
+    cloth_step_positions: wp.array[wp.vec3],
+    cloth_predicted_positions: wp.array[wp.vec3],
     cloth_rest_positions: wp.array[wp.vec3],
     cloth_edges: wp.array2d[int],
     rigid_positions: wp.array[wp.vec3],
+    rigid_step_positions: wp.array[wp.vec3],
+    rigid_predicted_positions: wp.array[wp.vec3],
     rigid_velocities: wp.array[wp.vec3],
     rigid_edges: wp.array2d[int],
     contact_ids: wp.array2d[int],
@@ -365,10 +369,28 @@ def detect_cloth_edge_rigid_edge(
     cloth_index_1 = cloth_edges[cloth_edge, 3]
     cloth_position_0 = cloth_positions[cloth_index_0]
     cloth_position_1 = cloth_positions[cloth_index_1]
+    cloth_step_position_0 = cloth_step_positions[cloth_index_0]
+    cloth_step_position_1 = cloth_step_positions[cloth_index_1]
+    cloth_predicted_position_0 = cloth_predicted_positions[cloth_index_0]
+    cloth_predicted_position_1 = cloth_predicted_positions[cloth_index_1]
     query = wp.bvh_query_aabb(
         rigid_edge_bvh_id,
-        wp.min(cloth_position_0, cloth_position_1) - wp.vec3(thickness),
-        wp.max(cloth_position_0, cloth_position_1) + wp.vec3(thickness),
+        wp.min(
+            wp.min(cloth_position_0, cloth_position_1),
+            wp.min(
+                wp.min(cloth_step_position_0, cloth_step_position_1),
+                wp.min(cloth_predicted_position_0, cloth_predicted_position_1),
+            ),
+        )
+        - wp.vec3(thickness),
+        wp.max(
+            wp.max(cloth_position_0, cloth_position_1),
+            wp.max(
+                wp.max(cloth_step_position_0, cloth_step_position_1),
+                wp.max(cloth_predicted_position_0, cloth_predicted_position_1),
+            ),
+        )
+        + wp.vec3(thickness),
     )
     rigid_edge = wp.int32(-1)
     while wp.bvh_query_next(query, rigid_edge):
@@ -376,6 +398,10 @@ def detect_cloth_edge_rigid_edge(
         rigid_index_1 = rigid_edges[rigid_edge, 3]
         rigid_position_0 = rigid_positions[rigid_index_0]
         rigid_position_1 = rigid_positions[rigid_index_1]
+        rigid_step_position_0 = rigid_step_positions[rigid_index_0]
+        rigid_step_position_1 = rigid_step_positions[rigid_index_1]
+        rigid_predicted_position_0 = rigid_predicted_positions[rigid_index_0]
+        rigid_predicted_position_1 = rigid_predicted_positions[rigid_index_1]
         parameters = wp.closest_point_edge_edge(
             cloth_position_0,
             cloth_position_1,
@@ -385,18 +411,62 @@ def detect_cloth_edge_rigid_edge(
         )
         cloth_parameter = parameters[0]
         rigid_parameter = parameters[1]
-        if (
+        current_interior = not (
             cloth_parameter <= _MIN_CONTACT_DISTANCE
             or cloth_parameter >= 1.0 - _MIN_CONTACT_DISTANCE
             or rigid_parameter <= _MIN_CONTACT_DISTANCE
             or rigid_parameter >= 1.0 - _MIN_CONTACT_DISTANCE
-        ):
+        )
+        predicted_parameters = wp.closest_point_edge_edge(
+            cloth_predicted_position_0,
+            cloth_predicted_position_1,
+            rigid_predicted_position_0,
+            rigid_predicted_position_1,
+            1.0e-5,
+        )
+        predicted_cloth_parameter = predicted_parameters[0]
+        predicted_rigid_parameter = predicted_parameters[1]
+        predicted_interior = not (
+            predicted_cloth_parameter <= _MIN_CONTACT_DISTANCE
+            or predicted_cloth_parameter >= 1.0 - _MIN_CONTACT_DISTANCE
+            or predicted_rigid_parameter <= _MIN_CONTACT_DISTANCE
+            or predicted_rigid_parameter >= 1.0 - _MIN_CONTACT_DISTANCE
+        )
+        if not current_interior and not predicted_interior:
             continue
+        if not current_interior:
+            cloth_parameter = predicted_cloth_parameter
+            rigid_parameter = predicted_rigid_parameter
         cloth_closest = wp.lerp(cloth_position_0, cloth_position_1, cloth_parameter)
         rigid_closest = wp.lerp(rigid_position_0, rigid_position_1, rigid_parameter)
         separation = cloth_closest - rigid_closest
         distance = wp.length(separation)
-        if distance <= _MIN_CONTACT_DISTANCE or distance >= thickness:
+        step_cloth_closest = wp.lerp(cloth_step_position_0, cloth_step_position_1, cloth_parameter)
+        step_rigid_closest = wp.lerp(rigid_step_position_0, rigid_step_position_1, rigid_parameter)
+        step_separation = step_cloth_closest - step_rigid_closest
+        step_distance = wp.length(step_separation)
+        if step_distance <= _MIN_CONTACT_DISTANCE:
+            continue
+        reference_direction = step_separation / step_distance
+        direction = reference_direction
+        signed_gap = wp.dot(separation, reference_direction)
+        if distance > _MIN_CONTACT_DISTANCE:
+            direction = separation / distance
+            if wp.dot(direction, reference_direction) < 0.0:
+                direction = -direction
+            signed_gap = wp.dot(separation, direction)
+        predicted_cloth_closest = wp.lerp(
+            cloth_predicted_position_0,
+            cloth_predicted_position_1,
+            predicted_cloth_parameter,
+        )
+        predicted_rigid_closest = wp.lerp(
+            rigid_predicted_position_0,
+            rigid_predicted_position_1,
+            predicted_rigid_parameter,
+        )
+        predicted_signed_gap = wp.dot(predicted_cloth_closest - predicted_rigid_closest, reference_direction)
+        if signed_gap >= thickness and predicted_signed_gap >= thickness:
             continue
 
         contact = wp.atomic_add(contact_count, 0, 1)
@@ -407,8 +477,8 @@ def detect_cloth_edge_rigid_edge(
         contact_ids[contact, 1] = cloth_index_1
         contact_weights[contact, 0] = 1.0 - cloth_parameter
         contact_weights[contact, 1] = cloth_parameter
-        contact_directions[contact] = separation / distance
-        contact_depths[contact] = thickness - distance
+        contact_directions[contact] = direction
+        contact_depths[contact] = thickness - signed_gap
         rigid_velocity = wp.lerp(
             rigid_velocities[rigid_index_0],
             rigid_velocities[rigid_index_1],
@@ -604,6 +674,8 @@ def accumulate_mollified_edge_edge_force(
     contact = wp.tid()
     if contact >= wp.min(count[0], capacity):
         return
+    if depths[contact] <= 0.0:
+        return
 
     index_0 = ids[contact, 0]
     index_1 = ids[contact, 1]
@@ -655,6 +727,8 @@ def mollified_edge_edge_hessian_multiply(
     contact = wp.tid()
     if contact >= wp.min(count[0], capacity):
         return
+    if depths[contact] <= 0.0:
+        return
 
     index_0 = ids[contact, 0]
     index_1 = ids[contact, 1]
@@ -698,6 +772,8 @@ def accumulate_mollified_edge_edge_diagonal(
 ):
     contact = wp.tid()
     if contact >= wp.min(count[0], capacity):
+        return
+    if depths[contact] <= 0.0:
         return
 
     index_0 = ids[contact, 0]
