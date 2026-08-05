@@ -22,11 +22,17 @@ from .kinematic_mesh_contact_kernels import (
     accumulate_damping_force,
     accumulate_friction_diagonal,
     accumulate_friction_force,
+    accumulate_mollified_edge_edge_diagonal,
+    accumulate_mollified_edge_edge_force,
     contact_hessian_multiply,
     damping_hessian_multiply,
+    detect_cloth_edge_rigid_edge,
     detect_cloth_vertex_rigid_face,
     detect_rigid_vertex_cloth_face,
     friction_hessian_multiply,
+    mollified_edge_edge_hessian_multiply,
+    prepare_edge_edge_mollifier,
+    update_edge_bounds,
     update_triangle_bounds,
 )
 
@@ -47,6 +53,7 @@ class _KinematicContactBuffer:
         self.weights = wp.zeros((capacity, arity), dtype=wp.float32, device=self.device)
         self.directions = wp.zeros(capacity, dtype=wp.vec3, device=self.device)
         self.depths = wp.zeros(capacity, dtype=wp.float32, device=self.device)
+        self.load_scales = wp.ones(capacity, dtype=wp.float32, device=self.device)
         self.rigid_velocities = wp.zeros(capacity, dtype=wp.vec3, device=self.device)
         self.count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self.overflow_count = wp.zeros(1, dtype=wp.int32, device=self.device)
@@ -67,6 +74,7 @@ class _KinematicContactBuffer:
                 self.weights,
                 self.directions,
                 self.depths,
+                self.load_scales,
                 self.count,
                 self.arity,
                 self.capacity,
@@ -92,6 +100,7 @@ class _KinematicContactBuffer:
                 self.ids,
                 self.weights,
                 self.directions,
+                self.load_scales,
                 self.count,
                 self.arity,
                 self.capacity,
@@ -112,6 +121,7 @@ class _KinematicContactBuffer:
                 self.ids,
                 self.weights,
                 self.directions,
+                self.load_scales,
                 self.count,
                 self.arity,
                 self.capacity,
@@ -139,6 +149,7 @@ class _KinematicContactBuffer:
                 self.weights,
                 self.directions,
                 self.rigid_velocities,
+                self.load_scales,
                 self.count,
                 self.arity,
                 self.capacity,
@@ -171,6 +182,7 @@ class _KinematicContactBuffer:
                 self.weights,
                 self.directions,
                 self.rigid_velocities,
+                self.load_scales,
                 self.count,
                 self.arity,
                 self.capacity,
@@ -202,6 +214,7 @@ class _KinematicContactBuffer:
                 self.weights,
                 self.directions,
                 self.rigid_velocities,
+                self.load_scales,
                 self.count,
                 self.arity,
                 self.capacity,
@@ -232,6 +245,7 @@ class _KinematicContactBuffer:
                 self.weights,
                 self.directions,
                 self.depths,
+                self.load_scales,
                 self.rigid_velocities,
                 self.count,
                 self.arity,
@@ -269,6 +283,7 @@ class _KinematicContactBuffer:
                 self.weights,
                 self.directions,
                 self.depths,
+                self.load_scales,
                 self.rigid_velocities,
                 self.count,
                 self.arity,
@@ -305,6 +320,7 @@ class _KinematicContactBuffer:
                 self.weights,
                 self.directions,
                 self.depths,
+                self.load_scales,
                 self.rigid_velocities,
                 self.count,
                 self.arity,
@@ -334,6 +350,124 @@ class _KinematicContactBuffer:
     def _validate_particle_array(self, array: wp.array, dtype: Any) -> None:
         if array.device != self.device or array.dtype != dtype or len(array) != self.particle_count:
             raise ValueError(f"particle array must contain {self.particle_count} {dtype} values on {self.device}")
+
+
+class _KinematicEdgeEdgeContactBuffer(_KinematicContactBuffer):
+    """Dynamic-static EE contacts with stored IPC mollifier thresholds."""
+
+    def __init__(self, capacity: int, particle_count: int, device: Any):
+        super().__init__(arity=2, capacity=capacity, particle_count=particle_count, device=device)
+        self.mollifier_thresholds = wp.zeros(capacity, dtype=wp.float32, device=self.device)
+        self.mollifier_active = wp.zeros(capacity, dtype=wp.int32, device=self.device)
+        self.rigid_edge_vectors = wp.zeros(capacity, dtype=wp.vec3, device=self.device)
+
+    def prepare_hessian(self, positions: wp.array[wp.vec3]) -> None:
+        """Mark near-parallel EE contacts whose IPC mollifier is active."""
+        self._validate_particle_array(positions, wp.vec3)
+        wp.launch(
+            prepare_edge_edge_mollifier,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.rigid_edge_vectors,
+                self.mollifier_thresholds,
+                self.count,
+                self.capacity,
+                positions,
+            ],
+            outputs=[self.mollifier_active, self.load_scales],
+            device=self.device,
+        )
+
+    def accumulate_force(
+        self,
+        stiffness: float,
+        positions: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add exact forces of the IPC-mollified dynamic-static EE energy."""
+        self._validate_particle_array(positions, wp.vec3)
+        self._validate_particle_array(output, wp.vec3)
+        wp.launch(
+            accumulate_mollified_edge_edge_force,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.depths,
+                self.rigid_edge_vectors,
+                self.mollifier_thresholds,
+                self.mollifier_active,
+                self.count,
+                self.capacity,
+                stiffness,
+                positions,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def hessian_multiply(
+        self,
+        stiffness: float,
+        positions: wp.array[wp.vec3],
+        vector: wp.array[wp.vec3],
+        output: wp.array[wp.vec3],
+    ) -> None:
+        """Add Gauss-Newton products of the mollified EE energy."""
+        self._validate_particle_array(positions, wp.vec3)
+        self._validate_particle_array(vector, wp.vec3)
+        self._validate_particle_array(output, wp.vec3)
+        wp.launch(
+            mollified_edge_edge_hessian_multiply,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.depths,
+                self.rigid_edge_vectors,
+                self.mollifier_thresholds,
+                self.mollifier_active,
+                self.count,
+                self.capacity,
+                stiffness,
+                positions,
+                vector,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
+
+    def accumulate_diagonal(
+        self,
+        stiffness: float,
+        positions: wp.array[wp.vec3],
+        output: wp.array[wp.mat33],
+    ) -> None:
+        """Add exact diagonal blocks of the mollified EE Gauss-Newton operator."""
+        self._validate_particle_array(positions, wp.vec3)
+        self._validate_particle_array(output, wp.mat33)
+        wp.launch(
+            accumulate_mollified_edge_edge_diagonal,
+            dim=self.capacity,
+            inputs=[
+                self.ids,
+                self.weights,
+                self.directions,
+                self.depths,
+                self.rigid_edge_vectors,
+                self.mollifier_thresholds,
+                self.mollifier_active,
+                self.count,
+                self.capacity,
+                stiffness,
+                positions,
+            ],
+            outputs=[output],
+            device=self.device,
+        )
 
 
 @wp.kernel
@@ -515,17 +649,30 @@ class ConstraintKinematicMeshContact:
         if np.any(cloth_triangles_np < 0) or np.any(cloth_triangles_np >= model.particle_count):
             raise ValueError("model triangle topology contains an invalid particle index")
         self.cloth_triangles = wp.array(cloth_triangles_np, dtype=wp.int32, device=self.device)
+        cloth_edges_np = MeshAdjacency(cloth_triangles_np).edge_indices.astype(np.int32)
+        self.cloth_edges = wp.array(cloth_edges_np, dtype=wp.int32, device=self.device)
+        self.cloth_rest_positions = wp.clone(model.particle_q)
         self.cloth_triangle_count = len(cloth_triangles_np)
         self.collider_triangle_count = len(triangles_np)
+        self.cloth_edge_count = len(cloth_edges_np)
+        self.collider_edge_count = len(edges_np)
         self.cloth_triangle_lower_bounds = wp.empty(self.cloth_triangle_count, dtype=wp.vec3, device=self.device)
         self.cloth_triangle_upper_bounds = wp.empty_like(self.cloth_triangle_lower_bounds)
         self.collider_triangle_lower_bounds = wp.empty(self.collider_triangle_count, dtype=wp.vec3, device=self.device)
         self.collider_triangle_upper_bounds = wp.empty_like(self.collider_triangle_lower_bounds)
+        self.cloth_edge_lower_bounds = wp.empty(self.cloth_edge_count, dtype=wp.vec3, device=self.device)
+        self.cloth_edge_upper_bounds = wp.empty_like(self.cloth_edge_lower_bounds)
+        self.collider_edge_lower_bounds = wp.empty(self.collider_edge_count, dtype=wp.vec3, device=self.device)
+        self.collider_edge_upper_bounds = wp.empty_like(self.collider_edge_lower_bounds)
         self._update_triangle_bounds(model.particle_q)
+        self._update_edge_bounds(model.particle_q)
         self.cloth_triangle_bvh = wp.Bvh(self.cloth_triangle_lower_bounds, self.cloth_triangle_upper_bounds)
         self.collider_triangle_bvh = wp.Bvh(self.collider_triangle_lower_bounds, self.collider_triangle_upper_bounds)
+        self.cloth_edge_bvh = wp.Bvh(self.cloth_edge_lower_bounds, self.cloth_edge_upper_bounds)
+        self.collider_edge_bvh = wp.Bvh(self.collider_edge_lower_bounds, self.collider_edge_upper_bounds)
         self.cloth_vertex_face_contacts = _KinematicContactBuffer(1, max_contacts, self.particle_count, self.device)
         self.rigid_vertex_face_contacts = _KinematicContactBuffer(3, max_contacts, self.particle_count, self.device)
+        self.edge_edge_contacts = _KinematicEdgeEdgeContactBuffer(max_contacts, self.particle_count, self.device)
         self._velocities: wp.array[wp.vec3] | None = None
         self._anchor_positions: wp.array[wp.vec3] | None = None
         if self.friction > 0.0:
@@ -589,7 +736,7 @@ class ConstraintKinematicMeshContact:
             self._anchor_positions.assign(positions)
 
     def prepare(self, positions: wp.array[wp.vec3]) -> None:
-        """Detect and freeze cross-surface VF contacts."""
+        """Detect and freeze cross-surface VF and EE contacts."""
         self._validate_particle_vectors((positions, "positions"))
         if self._velocities is None or self._dt <= 0.0:
             raise RuntimeError("begin_step() must be called before prepare()")
@@ -597,10 +744,14 @@ class ConstraintKinematicMeshContact:
             raise RuntimeError("update_colliders() must be called before prepare()")
 
         self._update_triangle_bounds(positions)
+        self._update_edge_bounds(positions)
         self.cloth_triangle_bvh.refit()
         self.collider_triangle_bvh.refit()
+        self.cloth_edge_bvh.refit()
+        self.collider_edge_bvh.refit()
         self.cloth_vertex_face_contacts.clear()
         self.rigid_vertex_face_contacts.clear()
+        self.edge_edge_contacts.clear()
         wp.launch(
             detect_cloth_vertex_rigid_face,
             dim=self.particle_count,
@@ -647,6 +798,34 @@ class ConstraintKinematicMeshContact:
             ],
             device=self.device,
         )
+        wp.launch(
+            detect_cloth_edge_rigid_edge,
+            dim=self.cloth_edge_count,
+            inputs=[
+                self.collider_edge_bvh.id,
+                self.thickness,
+                self.max_contacts,
+                positions,
+                self.cloth_rest_positions,
+                self.cloth_edges,
+                self.collider_positions,
+                self.collider_velocities,
+                self.collider_edges,
+            ],
+            outputs=[
+                self.edge_edge_contacts.ids,
+                self.edge_edge_contacts.weights,
+                self.edge_edge_contacts.directions,
+                self.edge_edge_contacts.depths,
+                self.edge_edge_contacts.rigid_velocities,
+                self.edge_edge_contacts.mollifier_thresholds,
+                self.edge_edge_contacts.rigid_edge_vectors,
+                self.edge_edge_contacts.count,
+                self.edge_edge_contacts.overflow_count,
+            ],
+            device=self.device,
+        )
+        self.edge_edge_contacts.prepare_hessian(positions)
 
     def accumulate_force(self, positions: wp.array[wp.vec3], output: wp.array[wp.vec3]) -> None:
         """Add cached normal, damping, and friction forces."""
@@ -654,6 +833,8 @@ class ConstraintKinematicMeshContact:
         velocities = self._step_velocities()
         for contacts in self._vf_contact_buffers():
             contacts.accumulate_force(self.stiffness, output)
+        self.edge_edge_contacts.accumulate_force(self.stiffness, positions, output)
+        for contacts in self._contact_buffers():
             if self.normal_damping > 0.0:
                 contacts.accumulate_damping_force(self.normal_damping, self._dt, velocities, output)
             if self.friction > 0.0:
@@ -682,6 +863,8 @@ class ConstraintKinematicMeshContact:
         velocities = self._step_velocities()
         for contacts in self._vf_contact_buffers():
             contacts.hessian_multiply(self.stiffness, vector, output)
+        self.edge_edge_contacts.hessian_multiply(self.stiffness, positions, vector, output)
+        for contacts in self._contact_buffers():
             if self.normal_damping > 0.0:
                 contacts.damping_hessian_multiply(
                     self.normal_damping,
@@ -710,6 +893,8 @@ class ConstraintKinematicMeshContact:
         velocities = self._step_velocities()
         for contacts in self._vf_contact_buffers():
             contacts.accumulate_diagonal(self.stiffness, output)
+        self.edge_edge_contacts.accumulate_diagonal(self.stiffness, positions, output)
+        for contacts in self._contact_buffers():
             if self.normal_damping > 0.0:
                 contacts.accumulate_damping_diagonal(self.normal_damping, self._dt, velocities, output)
             if self.friction > 0.0:
@@ -738,6 +923,27 @@ class ConstraintKinematicMeshContact:
             outputs=[self.collider_triangle_lower_bounds, self.collider_triangle_upper_bounds],
             device=self.device,
         )
+
+    def _update_edge_bounds(self, cloth_positions: wp.array[wp.vec3]) -> None:
+        wp.launch(
+            update_edge_bounds,
+            dim=self.cloth_edge_count,
+            inputs=[cloth_positions, self.cloth_edges],
+            outputs=[self.cloth_edge_lower_bounds, self.cloth_edge_upper_bounds],
+            device=self.device,
+        )
+        wp.launch(
+            update_edge_bounds,
+            dim=self.collider_edge_count,
+            inputs=[self.collider_positions, self.collider_edges],
+            outputs=[self.collider_edge_lower_bounds, self.collider_edge_upper_bounds],
+            device=self.device,
+        )
+
+    def _contact_buffers(
+        self,
+    ) -> tuple[_KinematicContactBuffer, _KinematicContactBuffer, _KinematicEdgeEdgeContactBuffer]:
+        return self.cloth_vertex_face_contacts, self.rigid_vertex_face_contacts, self.edge_edge_contacts
 
     def _vf_contact_buffers(self) -> tuple[_KinematicContactBuffer, _KinematicContactBuffer]:
         return self.cloth_vertex_face_contacts, self.rigid_vertex_face_contacts
