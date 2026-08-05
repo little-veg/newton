@@ -81,9 +81,11 @@ class SolverLIMX(SolverBase):
     Static constraints assemble forces and analytic positive-semidefinite
     Hessian blocks at the current Newton iterate. Their fixed topology is
     stored in a ``3 x 3`` block-CSR matrix whose values are rebuilt before
-    every PCG solve. Dynamic constraints, such as future collision terms, can
+    every PCG solve. Dynamic constraints, such as collision terms, can
     add matrix-free force, Hessian-vector, and diagonal contributions through
-    ``dynamic_operator``.
+    ``dynamic_operator``. Rigid bodies in the same model are treated as
+    kinematic data: LIMX carries their state through unchanged but does not
+    integrate it.
     """
 
     def __init__(
@@ -98,7 +100,8 @@ class SolverLIMX(SolverBase):
         """Create a LIMX projected-Newton particle solver.
 
         Args:
-            model: Particle-only model containing active, positive-mass particles.
+            model: Model containing active, positive-mass particles. Any rigid
+                and joint state is carried through unchanged.
             constraints: Static constraint batches that provide current-position
                 force and Hessian assembly methods.
             nonlinear_iterations: Newton position iterations per step.
@@ -107,8 +110,6 @@ class SolverLIMX(SolverBase):
             dynamic_operator: Optional matrix-free dynamic constraint operator.
         """
         super().__init__(model)
-        if model.body_count > 0:
-            raise ValueError("SolverLIMX is particle-only and does not accept rigid bodies")
         if model.particle_count <= 0 or model.particle_mass is None:
             raise ValueError("SolverLIMX requires at least one particle")
         masses = model.particle_mass.numpy()
@@ -252,3 +253,10 @@ class SolverLIMX(SolverBase):
             outputs=[state_out.particle_q, state_out.particle_qd],
             device=self.device,
         )
+        if model.body_count > 0:
+            state_out.body_q.assign(state_in.body_q)
+            state_out.body_qd.assign(state_in.body_qd)
+        if model.joint_coord_count > 0:
+            state_out.joint_q.assign(state_in.joint_q)
+        if model.joint_dof_count > 0:
+            state_out.joint_qd.assign(state_in.joint_qd)

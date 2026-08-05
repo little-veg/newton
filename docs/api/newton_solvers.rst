@@ -38,6 +38,7 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    ConstraintDihedralBending
    ConstraintDistance
    ConstraintGroupDynamic
+   ConstraintKinematicMeshContact
    ConstraintSelfCollision
    ConstraintStaticPlaneContact
    ConstraintTriangleElastic

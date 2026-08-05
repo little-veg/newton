@@ -543,6 +543,13 @@ add_example_test(
 )
 add_example_test(
     TestClothExamples,
+    name="cloth.example_cloth_limx_franka_drop",
+    devices=cuda_test_devices,
+    test_options={"num-frames": 60, "graph_capture": True},
+    use_viewer=True,
+)
+add_example_test(
+    TestClothExamples,
     name="cloth.example_cloth_twist",
     devices=cuda_test_devices,
     test_options={"num-frames": 100},

@@ -538,7 +538,16 @@ def _box_surface(half_extents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
 
 
 class ConstraintKinematicMeshContact:
-    """Matrix-free cloth contact against selected kinematic rigid shapes."""
+    """Matrix-free cloth contact against selected kinematic rigid shapes.
+
+    Mesh, convex-mesh, and box shapes are converted to one triangle surface.
+    Contact detection includes both vertex-face directions and edge-edge
+    pairs. Forces and matrix-free Hessian terms are accumulated only on the
+    cloth particles; the selected rigid shapes act as prescribed colliders.
+
+    Call :meth:`update_colliders` before each solver step so the contact
+    surface follows the current rigid transforms and velocities.
+    """
 
     def __init__(
         self,

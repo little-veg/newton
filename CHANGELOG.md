@@ -13,6 +13,7 @@
 - Add a CUDA LIMX example that contrasts a settled control with geometry-aware VF/EE self-collision at a 6 mm nominal thickness.
 - Add a LIMX T-shirt table-contact example with self-collision, contact damping, and friction.
 - Add a LIMX scene with a square cloth on a table and an IK-driven Franka grasp trajectory.
+- Add LIMX cloth contact against kinematic mesh, convex-mesh, and box shapes using bidirectional VF and IPC-mollified EE penalties with damping, friction, and consistent matrix-free Hessians.
 - Break the viewer's shape count down into visual and collision shapes. The two are listed under `Shapes` in the stats overlay and need not sum to the total, since a shape can be both.
 - Add selection of the shapes included in model shape BVHs through `Model.bvh_build_shapes(shape_flags=...)` and `ModelBuilder.default_bvh_cfg.shape_flags`, e.g. `ShapeFlags.VISIBLE | ShapeFlags.COLLIDE_SHAPES` to also include collision shapes.
 - Add a `damping` parameter to `ModelBuilder.add_joint_ball()` that applies passive angular damping to all three ball-joint DOFs; when omitted, `ModelBuilder.default_joint_cfg.damping` applies.

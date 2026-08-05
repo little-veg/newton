@@ -11,6 +11,7 @@ from newton._src.solvers.limx.block_csr import BlockCsrBuilder
 from newton._src.solvers.limx.constraints.anchor import ConstraintAnchor
 from newton._src.solvers.limx.constraints.dihedral_bending import ConstraintDihedralBending
 from newton._src.solvers.limx.constraints.distance import ConstraintDistance
+from newton._src.solvers.limx.constraints.kinematic_mesh_contact import ConstraintKinematicMeshContact
 from newton._src.solvers.limx.constraints.self_collision import (
     ConstraintSelfCollision,
     _ContactBuffer,
@@ -2360,17 +2361,29 @@ class TestSolverLIMX(unittest.TestCase):
         self.assertIs(newton.solvers.ConstraintAnchor, ConstraintAnchor)
         self.assertIs(newton.solvers.ConstraintDihedralBending, ConstraintDihedralBending)
         self.assertIs(newton.solvers.ConstraintDistance, ConstraintDistance)
+        self.assertIs(newton.solvers.ConstraintKinematicMeshContact, ConstraintKinematicMeshContact)
         self.assertIs(newton.solvers.ConstraintSelfCollision, ConstraintSelfCollision)
         self.assertIs(newton.solvers.ConstraintTriangleElastic, ConstraintTriangleElastic)
 
-    def test_rejects_model_with_rigid_bodies(self):
+    def test_carries_kinematic_rigid_state_through_particle_step(self):
+        """Carry rigid state through unchanged while LIMX advances particles."""
         builder = newton.ModelBuilder()
         builder.add_particles(pos=[wp.vec3(0.0)], vel=[wp.vec3(0.0)], mass=[1.0])
         builder.add_body()
         model = builder.finalize(device="cpu")
+        model.set_gravity((0.0, 0.0, 0.0))
+        solver = SolverLIMX(model, [], nonlinear_iterations=1, linear_iterations=1)
+        state_in = model.state()
+        state_out = model.state()
+        body_q = wp.transform(wp.vec3(1.0, 2.0, 3.0), wp.quat_identity())
+        body_qd = wp.spatial_vector(0.1, 0.2, 0.3, -0.4, -0.5, -0.6)
+        state_in.body_q.assign([body_q])
+        state_in.body_qd.assign([body_qd])
 
-        with self.assertRaisesRegex(ValueError, "particle-only"):
-            SolverLIMX(model, [])
+        solver.step(state_in, state_out, None, None, 0.01)
+
+        np.testing.assert_allclose(state_out.body_q.numpy(), state_in.body_q.numpy(), rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(state_out.body_qd.numpy(), state_in.body_qd.numpy(), rtol=0.0, atol=0.0)
 
     def test_rejects_inactive_particles_in_favor_of_anchor_constraints(self):
         builder = newton.ModelBuilder()
