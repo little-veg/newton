@@ -59,3 +59,9 @@
 - Context: The LIMX Franka cloth-drop scene reported retained contacts and no overflow, but the rendered cloth visibly penetrated both gripper fingers.
 - Mistake: Treated contact counts, barrier depth, and a stable final velocity as sufficient evidence that rigid-cloth collision was correct.
 - Rule: Validate rigid-cloth scenes with direct cloth-to-collider geometric separation or signed-side-crossing measurements for every relevant rigid link. Contact counters and solver stability are supporting diagnostics, not proof that penetration did not occur.
+
+## 2026-08-06 — Verify rigid-cloth contact releases after separation
+
+- Context: The LIMX Franka box-grasp scene could lift the cloth, but the cloth appeared to remain stuck to a gripper finger.
+- Mistake: Treated successful lift, low penetration, and stable hold as sufficient acceptance without checking that normal and friction contacts deactivate when the gripper separates from the cloth.
+- Rule: For moving rigid-cloth contact, add an explicit release phase and verify that cached or predictive VF/EE contacts contribute zero normal, damping, and friction load after outward separation. A successful grasp is incomplete evidence unless release also works.
