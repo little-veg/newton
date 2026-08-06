@@ -7,9 +7,10 @@ edge or vertex after the box moves away. Preserve the existing 3 mm contact
 thickness, VF/EE representation, friction model, 0.01 s step, and complete
 force/Hessian operator.
 
-The motivating Franka rollout must still pinch and lift the cloth. After the
-fingers open, the cloth must release instead of remaining supported by
-contacts generated from the inward side of a box feature.
+The motivating Franka rollout must still pinch and lift the cloth. It must
+form a graspable fold without driving the finger boxes vertically through the
+flat sheet. After the fingers open, the cloth must release instead of
+remaining supported by invalid contacts or a topological loop around a finger.
 
 ## Root Cause
 
@@ -23,6 +24,13 @@ therefore also activate the lower edge and its endpoint vertices. Those
 redundant contacts have upward components and can balance gravity. The result
 looks adhesive even though every individual force is repulsive. Setting
 friction to zero does not remove the lock.
+
+The normal-cone correction removes those invalid primitive contacts, but the
+original Franka path has a second independent problem: the TCP descends to the
+cloth plane while the finger boxes extend another 5.9 mm below it. The boxes
+therefore pass vertically through the flat cloth before closing, leaving the
+sheet wrapped around a finger. A closed oriented collision model cannot undo
+that topology after it has formed.
 
 ## Chosen Design
 
@@ -57,6 +65,27 @@ Normal-cone filtering changes only which contact stencils are frozen. Accepted
 contacts continue to use the existing normal force, damping, friction,
 matrix-free Hessian-vector product, and diagonal Hessian implementations.
 
+## Table-Edge Fold Trajectory
+
+Replace the vertical center penetration with a surface sweep:
+
+1. Keep the fingers open and move the TCP above the front table edge, outside
+   the cloth footprint.
+2. Descend until the finger-box bottoms remain at least one 3 mm contact layer
+   above the tabletop.
+3. Translate horizontally from the table edge toward the cloth center. The
+   leading box contacts the front cloth edge and pushes it into a fold; no box
+   moves vertically through the sheet.
+4. Close the fingers at the center to pinch the generated fold.
+5. Lift and hold with the existing 0.01 s single-step simulation.
+6. Open at the raised pose, then retreat horizontally toward the table edge so
+   the fingers leave the fold rather than remaining threaded through it.
+
+The sweep height is derived from the table top, 3 mm contact thickness, and
+the selected finger-box lower extent. The test must verify zero cloth/finger
+triangle intersections before closing; successful lift is not accepted if the
+trajectory first tunnels through the cloth.
+
 ## Alternatives Rejected
 
 - **Disable reverse VF and EE for boxes:** avoids the observed lock but misses
@@ -64,8 +93,10 @@ matrix-free Hessian-vector product, and diagonal Hessian implementations.
 - **Lower friction or collision thickness:** friction zero still reproduces
   the problem, while a smaller activation distance only hides invalid feature
   ownership.
-- **Change only the Franka release trajectory:** can pull the collider away
-  from the symptom but leaves the contact defect in every box scene.
+- **Keep the vertical center descent and change only release:** cannot undo the
+  cloth/finger loop created before closure.
+- **Raise the vertical center grasp:** avoids intersection, but the flat sheet
+  never enters the jaws and the measured lift remains zero.
 
 ## Validation
 
@@ -78,10 +109,12 @@ Follow test-driven development:
    that reverse VF remains active.
 3. Add invalid and valid box-edge cases to verify that EE candidates are
    rejected outside and retained inside the edge normal cone.
-4. Extend the Franka rollout through its existing open phase and verify that
+4. Verify the edge-to-center sweep has zero strict cloth/finger triangle
+   intersections immediately before closure.
+5. Extend the Franka rollout through its open-and-retreat phase and verify that
    the formerly locked raised patch falls away while the earlier closed phase
    still lifts and holds the cloth.
-5. Run all kinematic-contact tests, both Franka examples, the registered
+6. Run all kinematic-contact tests, both Franka examples, the registered
    example smoke tests, and `uvx pre-commit run -a`.
 
 The implementation must retain zero contact-buffer overflow, finite state,

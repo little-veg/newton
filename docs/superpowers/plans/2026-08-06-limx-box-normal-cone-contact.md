@@ -268,15 +268,67 @@ git commit -m "Filter LIMX box contacts by normal cone"
 
 ---
 
-### Task 4: Verify release and close out the user-facing correction
+### Task 4: Sweep from the table edge to form a graspable fold
 
 **Files:**
+- Modify: `newton/examples/cloth/example_cloth_limx_franka.py`
 - Modify: `newton/tests/test_example_cloth_limx_franka.py`
+
+**Interfaces:**
+- Consumes: the selected finger-box lower extent, table top, 3 mm contact thickness, and existing IK keyframe interpolation.
+- Produces: edge approach, low horizontal sweep, center closure, lift/hold, open, and horizontal retreat keyframes.
+
+- [ ] **Step 1: Preserve the release RED test and add pre-close topology evidence**
+
+At the final open-sweep frame immediately before closing, count strict
+cloth/finger triangle intersections with the existing test helper and require
+zero. Continue to require lift, hold, no vertices inside boxes, and final
+release below the raised finger boxes.
+
+- [ ] **Step 2: Replace the vertical center descent with edge-sweep keyframes**
+
+Add constants for the front table-edge approach and safe sweep height. Build
+keyframes in this order: edge-above/open, edge-low/open, center-low/open,
+center-low/closed, raised/closed, raised/open, and edge-raised/open. Preserve
+`GRIPPER_CLOSED`, `LIFT_HEIGHT`, and the final 0.04 m finger opening.
+
+```python
+TABLE_FRONT_Y = TABLE_CENTER[1] - TABLE_HALF_EXTENTS[1]
+EDGE_APPROACH_Y = TABLE_FRONT_Y + 0.08
+SWEEP_HEIGHT = TABLE_TOP_Z + 0.010
+```
+
+- [ ] **Step 3: Run the trajectory GREEN test**
+
+Run:
+
+```bash
+uv run newton/tests/test_example_cloth_limx_franka.py
+```
+
+Expected: zero pre-close finger intersections, more than 0.10 m cloth lift,
+at least 0.5 s hold, and release after the open retreat. If the sweep does not
+form a fold, change only edge offset, sweep duration, or sweep height; do not
+change contact thickness, stiffness, friction, or substeps.
+
+- [ ] **Step 4: Commit the grasp trajectory**
+
+```bash
+git add newton/examples/cloth/example_cloth_limx_franka.py \
+        newton/tests/test_example_cloth_limx_franka.py
+git commit -m "Sweep LIMX cloth into Franka grasp"
+```
+
+---
+
+### Task 5: Verify release and close out the user-facing correction
+
+**Files:**
 - Modify: `CHANGELOG.md`
 - Modify if the accepted render changes: `docs/images/examples/example_cloth_limx_franka.jpg`
 
 **Interfaces:**
-- Consumes: ownership-filtered contact from Task 3 and the existing Franka keyframes.
+- Consumes: ownership-filtered contact from Task 3 and edge-sweep keyframes from Task 4.
 - Produces: a regression-protected grasp/hold/release rollout and a visible GL acceptance run.
 
 - [ ] **Step 1: Run the Franka release test**
