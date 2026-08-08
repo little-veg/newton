@@ -21,14 +21,16 @@ SIM_SUBSTEPS = 1
 TABLE_CENTER = (0.0, -0.5, 0.1)
 TABLE_HALF_EXTENTS = (0.4, 0.4, 0.1)
 TABLE_TOP_Z = 0.2
-CLOTH_CENTER = (0.0, -0.5)
+TABLE_FRONT_Y = TABLE_CENTER[1] - TABLE_HALF_EXTENTS[1]
 CLOTH_WIDTH = 0.4
-CLOTH_GRASP_Y = CLOTH_CENTER[1]
-CLOTH_GRID_CELLS = 20
+CLOTH_OVERHANG = 0.06
+CLOTH_CENTER = (0.0, TABLE_FRONT_Y + 0.5 * CLOTH_WIDTH - CLOTH_OVERHANG)
+CLOTH_GRASP_Y = TABLE_FRONT_Y - 0.04
+CLOTH_GRID_CELLS = 50
 CLOTH_HEIGHT = TABLE_TOP_Z + 0.005
 CLOTH_PARTICLE_RADIUS = 0.003
 CLOTH_MASS = 0.2
-FRANKA_BASE = (-0.5, -0.5, -0.1)
+FRANKA_BASE = (-0.3, -1.25, -0.1)
 FRANKA_Q = (
     -3.6802115e-03,
     2.3901723e-02,
@@ -40,10 +42,12 @@ FRANKA_Q = (
     0.04,
     0.04,
 )
-GRIPPER_DOWN = (1.0, 0.0, 0.0, 0.0)
+GRIPPER_EDGE = (-(2.0**-0.5), 0.0, 0.0, 2.0**-0.5)
 GRIPPER_CLOSED = 0.0029
+GRASP_HEIGHT = CLOTH_HEIGHT
 LIFT_HEIGHT = 0.42
-SEQUENCE_DURATION = 6.4
+RETREAT_Y = TABLE_FRONT_Y - CLOTH_OVERHANG - 0.06
+SEQUENCE_DURATION = 5.1
 COLLIDER_BODY_SUFFIXES = (
     "fr3_leftfinger",
     "fr3_rightfinger",
@@ -148,7 +152,17 @@ def _select_collider_shapes(model: newton.Model) -> list[int]:
 
 
 class Example:
-    def __init__(self, viewer, args=None):
+    def __init__(
+        self,
+        viewer,
+        args=None,
+        *,
+        franka_base=FRANKA_BASE,
+        cloth_center=CLOTH_CENTER,
+        initial_ik_solve_batches=1,
+    ):
+        if initial_ik_solve_batches <= 0:
+            raise ValueError("initial_ik_solve_batches must be positive")
         self.viewer = viewer
         self.fps = FPS
         self.frame_dt = 1.0 / self.fps
@@ -158,14 +172,17 @@ class Example:
         self.table_top_z = TABLE_TOP_Z
         self.use_graph = bool(getattr(args, "graph_capture", True))
         self.collect_metrics = isinstance(viewer, ViewerNull) or bool(getattr(args, "test", False))
+        self.franka_base = franka_base
+        self.cloth_center = cloth_center
+        self.initial_ik_solve_batches = initial_ik_solve_batches
 
         builder = newton.ModelBuilder(gravity=(0.0, 0.0, -9.81))
         builder.add_urdf(
             newton.utils.download_asset("franka_emika_panda") / "urdf/fr3_franka_hand.urdf",
-            xform=wp.transform(wp.vec3(*FRANKA_BASE), wp.quat_identity()),
+            xform=wp.transform(wp.vec3(*self.franka_base), wp.quat_identity()),
             floating=False,
             enable_self_collisions=False,
-            force_show_colliders=True,
+            force_show_colliders=False,
         )
         builder.joint_q[: len(FRANKA_Q)] = FRANKA_Q
         builder.joint_target_q[: len(FRANKA_Q)] = FRANKA_Q
@@ -183,7 +200,7 @@ class Example:
         positions, triangles = _create_square_cloth_grid(
             grid_cells=CLOTH_GRID_CELLS,
             width=CLOTH_WIDTH,
-            center=CLOTH_CENTER,
+            center=self.cloth_center,
             height=CLOTH_HEIGHT,
         )
         self.cloth_rest_positions = positions.copy()
@@ -202,6 +219,8 @@ class Example:
         self.model.set_gravity((0.0, 0.0, -9.81))
         self.hand_body = _find_label_index(self.model.body_label, "fr3_hand")
         self.collider_shape_indices = _select_collider_shapes(self.model)
+        self.table_shape_indices = self.collider_shape_indices[:1]
+        self.gripper_shape_indices = self.collider_shape_indices[1:]
         self.cloth_particle_indices = np.arange(self.model.particle_count, dtype=np.int32)
         self.inverse_rest_matrices = self.model.tri_poses.numpy()
         edge_rows = newton.utils.MeshAdjacency(triangles).edge_indices
@@ -233,17 +252,30 @@ class Example:
             friction=0.4,
             friction_epsilon=1.0e-2,
         )
-        self.kinematic_contact = newton.solvers.ConstraintKinematicMeshContact(
+        self.table_contact = newton.solvers.ConstraintKinematicMeshContact(
             model=self.model,
-            shape_indices=self.collider_shape_indices,
+            shape_indices=self.table_shape_indices,
             thickness=CLOTH_PARTICLE_RADIUS,
             stiffness=2.0e4,
-            normal_damping=0.5,
+            normal_damping=0.0,
+            friction=0.05,
+            friction_epsilon=1.0e-2,
+            max_contacts=65536,
+            enable_ccd=False,
+        )
+        self.gripper_contact = newton.solvers.ConstraintKinematicMeshContact(
+            model=self.model,
+            shape_indices=self.gripper_shape_indices,
+            thickness=CLOTH_PARTICLE_RADIUS,
+            stiffness=2.0e4,
+            normal_damping=0.0,
             friction=0.4,
             friction_epsilon=1.0e-2,
             max_contacts=65536,
+            enable_ccd=True,
         )
-        dynamic_constraints = newton.solvers.ConstraintGroupDynamic([self.self_collision, self.kinematic_contact])
+        self.kinematic_contacts = (self.table_contact, self.gripper_contact)
+        dynamic_constraints = newton.solvers.ConstraintGroupDynamic([self.self_collision, *self.kinematic_contacts])
         self.solver = newton.solvers.SolverLIMX(
             self.model,
             static_constraints,
@@ -263,6 +295,7 @@ class Example:
         self._initialize_robot_pose()
 
         self.maximum_contact_count = 0
+        self.maximum_ccd_binding_count = 0
         self.maximum_overflow_count = 0
         self.pre_lift_centroid_height: float | None = None
         self.maximum_cloth_lift = 0.0
@@ -280,20 +313,24 @@ class Example:
     def _build_keyframes(self):
         poses = np.asarray(
             [
-                [1.5, 0.0, CLOTH_GRASP_Y, LIFT_HEIGHT, *GRIPPER_DOWN, 0.04],
-                [1.2, 0.0, CLOTH_GRASP_Y, CLOTH_HEIGHT, *GRIPPER_DOWN, 0.04],
-                [0.8, 0.0, CLOTH_GRASP_Y, CLOTH_HEIGHT, *GRIPPER_DOWN, GRIPPER_CLOSED],
-                [1.5, 0.0, CLOTH_GRASP_Y, LIFT_HEIGHT, *GRIPPER_DOWN, GRIPPER_CLOSED],
-                [0.6, 0.0, CLOTH_GRASP_Y, LIFT_HEIGHT, *GRIPPER_DOWN, GRIPPER_CLOSED],
-                [0.8, 0.0, CLOTH_GRASP_Y, LIFT_HEIGHT, *GRIPPER_DOWN, 0.04],
+                [0.4, 0.0, CLOTH_GRASP_Y, GRASP_HEIGHT, *GRIPPER_EDGE, 0.04],
+                [0.8, 0.0, CLOTH_GRASP_Y, GRASP_HEIGHT, *GRIPPER_EDGE, GRIPPER_CLOSED],
+                [1.5, 0.0, CLOTH_GRASP_Y, LIFT_HEIGHT, *GRIPPER_EDGE, GRIPPER_CLOSED],
+                [0.8, 0.0, CLOTH_GRASP_Y, LIFT_HEIGHT, *GRIPPER_EDGE, GRIPPER_CLOSED],
+                [0.8, 0.0, CLOTH_GRASP_Y, LIFT_HEIGHT, *GRIPPER_EDGE, 0.04],
+                [0.8, 0.0, RETREAT_Y, LIFT_HEIGHT, *GRIPPER_EDGE, 0.04],
             ],
             dtype=np.float32,
         )
         self.targets = poses[:, 1:]
         self.key_times = np.cumsum(poses[:, 0])
         self.sequence_duration = float(self.key_times[-1])
+        self.preclose_time = float(self.key_times[0])
+        self.close_time = float(self.key_times[1])
+        self.lift_time = float(self.key_times[2])
+        self.hold_end_time = float(self.key_times[3])
         self.grasp_position = self.targets[1, :3].copy()
-        self.lift_position = self.targets[3, :3].copy()
+        self.lift_position = self.targets[2, :3].copy()
         self.minimum_grasp_error = np.inf
         self.maximum_tcp_height = -np.inf
 
@@ -332,7 +369,8 @@ class Example:
         self.tcp_position = wp.zeros(1, dtype=wp.vec3, device=self.model.device)
 
     def _initialize_robot_pose(self):
-        self.ik_solver.step(self.ik_joint_q, self.ik_joint_q, iterations=self.ik_iters)
+        for _ in range(self.initial_ik_solve_batches):
+            self.ik_solver.step(self.ik_joint_q, self.ik_joint_q, iterations=self.ik_iters)
         wp.launch(
             set_gripper_q,
             dim=1,
@@ -346,7 +384,11 @@ class Example:
         self.state_1.joint_qd.zero_()
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         newton.eval_fk(self.model, self.state_1.joint_q, self.state_1.joint_qd, self.state_1)
-        self.kinematic_contact.update_colliders(self.state_0.body_q, self.state_0.body_qd)
+        self._update_kinematic_colliders()
+
+    def _update_kinematic_colliders(self):
+        for contact in self.kinematic_contacts:
+            contact.update_colliders(self.state_0.body_q, self.state_0.body_qd)
 
     def update_ik_targets(self):
         t = min(self.sim_time, self.sequence_duration - 1.0e-6)
@@ -391,7 +433,7 @@ class Example:
         newton.eval_fk(self.model, self.state_0.joint_q, self.state_0.joint_qd, self.state_0)
         self.state_0.clear_forces()
         self.viewer.apply_forces(self.state_0)
-        self.kinematic_contact.update_colliders(self.state_0.body_q, self.state_0.body_qd)
+        self._update_kinematic_colliders()
         self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
         self.state_0.assign(self.state_1)
 
@@ -409,28 +451,33 @@ class Example:
             self.minimum_grasp_error,
             float(np.linalg.norm(tcp_position - self.grasp_position)),
         )
-        if self.sim_time >= self.key_times[2]:
+        if self.sim_time >= self.close_time:
             self.maximum_tcp_height = max(self.maximum_tcp_height, float(tcp_position[2]))
 
         contact_count = 0
         overflow_count = 0
-        for contacts in (
-            self.kinematic_contact.cloth_vertex_face_contacts,
-            self.kinematic_contact.rigid_vertex_face_contacts,
-            self.kinematic_contact.edge_edge_contacts,
-        ):
-            contact_count += min(int(contacts.count.numpy()[0]), contacts.capacity)
-            overflow_count += int(contacts.overflow_count.numpy()[0])
+        for contact in self.kinematic_contacts:
+            for contacts in (
+                contact.cloth_vertex_face_contacts,
+                contact.rigid_vertex_face_contacts,
+                contact.edge_edge_contacts,
+            ):
+                contact_count += min(int(contacts.count.numpy()[0]), contacts.capacity)
+                overflow_count += int(contacts.overflow_count.numpy()[0])
         self.maximum_contact_count = max(self.maximum_contact_count, contact_count)
+        self.maximum_ccd_binding_count = max(
+            self.maximum_ccd_binding_count,
+            int(self.gripper_contact.ccd_binding_count.numpy()[0]),
+        )
         self.maximum_overflow_count = max(self.maximum_overflow_count, overflow_count)
 
         centroid_height = float(self.state_0.particle_q.numpy()[:, 2].mean())
-        if self.sim_time >= self.key_times[2] and self.pre_lift_centroid_height is None:
+        if self.sim_time >= self.close_time and self.pre_lift_centroid_height is None:
             self.pre_lift_centroid_height = centroid_height
         if self.pre_lift_centroid_height is not None:
             lift = centroid_height - self.pre_lift_centroid_height
             self.maximum_cloth_lift = max(self.maximum_cloth_lift, lift)
-            if self.key_times[3] <= self.sim_time < self.key_times[4]:
+            if self.lift_time <= self.sim_time < self.hold_end_time:
                 if lift > 0.10 and contact_count > 0:
                     self.captured_hold_duration += self.frame_dt
                 else:
@@ -465,6 +512,8 @@ class Example:
             )
         if self.maximum_contact_count <= 0:
             raise AssertionError("Franka boxes never contacted the LIMX cloth")
+        if self.maximum_ccd_binding_count <= 0:
+            raise AssertionError("Franka rigid motion never produced a cloth-vertex CCD binding")
         if self.maximum_overflow_count > 0:
             raise AssertionError(f"Franka box contacts overflowed by {self.maximum_overflow_count}")
         if self.maximum_cloth_lift <= 0.10:

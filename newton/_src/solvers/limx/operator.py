@@ -43,6 +43,14 @@ def _add_mass_multiply(
 class EmptyDynamicConstraintOperator:
     """A matrix-free dynamic constraint operator that contributes nothing."""
 
+    def project_step(
+        self,
+        previous_positions: wp.array[wp.vec3],
+        inertia_positions: wp.array[wp.vec3],
+        iterate_positions: wp.array[wp.vec3],
+    ) -> None:
+        """Leave solver-private step positions unchanged."""
+
     def begin_step(
         self,
         positions: wp.array[wp.vec3],

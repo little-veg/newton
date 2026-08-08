@@ -31,6 +31,9 @@ class ConstraintGroupDynamic:
                 raise ValueError("Every dynamic constraint must use the same particle count")
             if wp.get_device(constraint.device) != self.device:
                 raise ValueError("Every dynamic constraint must use the same device")
+        self.uses_projected_step_positions = any(
+            bool(getattr(constraint, "uses_projected_step_positions", False)) for constraint in self.constraints
+        )
 
     def bind_static_system(
         self,
@@ -64,6 +67,49 @@ class ConstraintGroupDynamic:
         """
         for constraint in self.constraints:
             constraint.begin_step(positions, velocities, dt)
+
+    def begin_step_projected(
+        self,
+        original_positions: wp.array[wp.vec3],
+        projected_positions: wp.array[wp.vec3],
+        velocities: wp.array[wp.vec3],
+        dt: float,
+    ) -> None:
+        """Begin a step with child-specific original or projected positions.
+
+        Args:
+            original_positions: Input-state particle positions [m].
+            projected_positions: Solver-private projected positions [m].
+            velocities: Step-start particle velocities [m/s].
+            dt: Simulation time step [s].
+        """
+        for constraint in self.constraints:
+            begin_projected_step = getattr(constraint, "begin_step_projected", None)
+            if begin_projected_step is not None:
+                begin_projected_step(original_positions, projected_positions, velocities, dt)
+                continue
+            positions = original_positions
+            if bool(getattr(constraint, "uses_projected_step_positions", False)):
+                positions = projected_positions
+            constraint.begin_step(positions, velocities, dt)
+
+    def project_step(
+        self,
+        previous_positions: wp.array[wp.vec3],
+        inertia_positions: wp.array[wp.vec3],
+        iterate_positions: wp.array[wp.vec3],
+    ) -> None:
+        """Forward pre-solve positional projection to supporting children.
+
+        Args:
+            previous_positions: Solver-private step-start positions [m].
+            inertia_positions: Solver-private inertial targets [m].
+            iterate_positions: Solver-private Newton iterate positions [m].
+        """
+        for constraint in self.constraints:
+            project_step = getattr(constraint, "project_step", None)
+            if project_step is not None:
+                project_step(previous_positions, inertia_positions, iterate_positions)
 
     def prepare(self, positions: wp.array[wp.vec3]) -> None:
         """Prepare every child for the current Newton linearization.

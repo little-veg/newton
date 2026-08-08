@@ -5,10 +5,15 @@
 
 import warp as wp
 
+from ....geometry.kernels import triangle_closest_point
+
 _MIN_BARYCENTRIC_DENOMINATOR = 1.0e-12
 _MIN_CONTACT_DISTANCE = 1.0e-7
 _MIN_GEOMETRY_NORM = 1.0e-8
 _EE_MOLLIFIER_THRESHOLD_SCALE = 1.0e-3
+_CCD_MAX_ITERATIONS = 24
+_CCD_FACE_ROOT_ITERATIONS = 24
+_CCD_TIME_TOLERANCE = 1.0e-6
 
 
 @wp.func
@@ -35,6 +40,26 @@ def _triangle_barycentric(
     return wp.vec3(barycentric_0, barycentric_1, 1.0 - barycentric_0 - barycentric_1)
 
 
+@wp.func
+def _inside_feature_normal_cone(
+    separation: wp.vec3,
+    normals: wp.array2d[wp.vec3],
+    feature: int,
+    normal_count: int,
+):
+    if normal_count == 0:
+        return True
+    projection = wp.vec3(0.0)
+    tolerance = wp.max(_MIN_CONTACT_DISTANCE, 1.0e-3 * wp.length(separation))
+    for slot in range(3):
+        if slot < normal_count:
+            coefficient = wp.dot(separation, normals[feature, slot])
+            if coefficient < -tolerance:
+                return False
+            projection += coefficient * normals[feature, slot]
+    return wp.length(separation - projection) <= tolerance
+
+
 @wp.kernel
 def update_triangle_bounds(
     positions: wp.array[wp.vec3],
@@ -59,6 +84,251 @@ def predict_positions(
 ):
     index = wp.tid()
     predicted[index] = positions[index] + dt * velocities[index]
+
+
+@wp.func
+def _moving_triangle_face_ccd(
+    point: wp.vec3,
+    step_position_0: wp.vec3,
+    step_position_1: wp.vec3,
+    step_position_2: wp.vec3,
+    position_0: wp.vec3,
+    position_1: wp.vec3,
+    position_2: wp.vec3,
+    thickness: float,
+    one_sided: int,
+):
+    step_normal_raw = wp.cross(step_position_1 - step_position_0, step_position_2 - step_position_0)
+    normal_raw = wp.cross(position_1 - position_0, position_2 - position_0)
+    step_normal_length = wp.length(step_normal_raw)
+    normal_length = wp.length(normal_raw)
+    if step_normal_length <= _MIN_GEOMETRY_NORM or normal_length <= _MIN_GEOMETRY_NORM:
+        return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+
+    step_normal = step_normal_raw / step_normal_length
+    normal = normal_raw / normal_length
+    if wp.dot(step_normal, normal) <= 0.0:
+        return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+    side = float(1.0)
+    step_signed_distance = wp.dot(point - step_position_0, step_normal)
+    if one_sided == 0 and step_signed_distance < 0.0:
+        side = -1.0
+    step_gap = side * step_signed_distance - thickness
+    final_gap = side * wp.dot(point - position_0, normal) - thickness
+    if step_gap <= 0.0 or final_gap > 0.0:
+        return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+
+    lower = float(0.0)
+    upper = float(1.0)
+    for _iteration in range(_CCD_FACE_ROOT_ITERATIONS):
+        middle = 0.5 * (lower + upper)
+        sample_0 = wp.lerp(step_position_0, position_0, middle)
+        sample_1 = wp.lerp(step_position_1, position_1, middle)
+        sample_2 = wp.lerp(step_position_2, position_2, middle)
+        sample_normal_raw = wp.cross(sample_1 - sample_0, sample_2 - sample_0)
+        sample_normal_length = wp.length(sample_normal_raw)
+        if sample_normal_length <= _MIN_GEOMETRY_NORM:
+            return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+        sample_normal = sample_normal_raw / sample_normal_length
+        sample_gap = side * wp.dot(point - sample_0, sample_normal) - thickness
+        if sample_gap > 0.0:
+            lower = middle
+        else:
+            upper = middle
+
+    sample_0 = wp.lerp(step_position_0, position_0, upper)
+    sample_1 = wp.lerp(step_position_1, position_1, upper)
+    sample_2 = wp.lerp(step_position_2, position_2, upper)
+    sample_normal_raw = wp.cross(sample_1 - sample_0, sample_2 - sample_0)
+    sample_normal_length = wp.length(sample_normal_raw)
+    if sample_normal_length <= _MIN_GEOMETRY_NORM:
+        return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+    sample_normal = sample_normal_raw / sample_normal_length
+    signed_distance = wp.dot(point - sample_0, sample_normal)
+    projected = point - signed_distance * sample_normal
+    barycentric = _triangle_barycentric(sample_0, sample_1, sample_2, projected)
+    barycentric_tolerance = 1.0e-5
+    inside = (
+        barycentric[0] >= -barycentric_tolerance
+        and barycentric[1] >= -barycentric_tolerance
+        and barycentric[2] >= -barycentric_tolerance
+    )
+    if not inside:
+        return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+    final_closest, _final_barycentric, _final_feature = triangle_closest_point(
+        position_0,
+        position_1,
+        position_2,
+        point,
+    )
+    return True, upper, barycentric, wp.length(point - final_closest), side
+
+
+@wp.func
+def _moving_triangle_vertex_ccd(
+    point: wp.vec3,
+    step_position_0: wp.vec3,
+    step_position_1: wp.vec3,
+    step_position_2: wp.vec3,
+    position_0: wp.vec3,
+    position_1: wp.vec3,
+    position_2: wp.vec3,
+    thickness: float,
+    one_sided: int,
+):
+    face_hit, face_time, face_barycentric, face_final_distance, face_side = _moving_triangle_face_ccd(
+        point,
+        step_position_0,
+        step_position_1,
+        step_position_2,
+        position_0,
+        position_1,
+        position_2,
+        thickness,
+        one_sided,
+    )
+    displacement_0 = position_0 - step_position_0
+    displacement_1 = position_1 - step_position_1
+    displacement_2 = position_2 - step_position_2
+    maximum_motion = wp.max(
+        wp.length(displacement_0),
+        wp.max(wp.length(displacement_1), wp.length(displacement_2)),
+    )
+    if maximum_motion <= _MIN_GEOMETRY_NORM:
+        return face_hit, face_time, face_barycentric, face_final_distance, face_side
+
+    time = float(0.0)
+    for _iteration in range(_CCD_MAX_ITERATIONS):
+        sample_0 = wp.lerp(step_position_0, position_0, time)
+        sample_1 = wp.lerp(step_position_1, position_1, time)
+        sample_2 = wp.lerp(step_position_2, position_2, time)
+        normal_raw = wp.cross(sample_1 - sample_0, sample_2 - sample_0)
+        normal_length = wp.length(normal_raw)
+        if normal_length <= _MIN_GEOMETRY_NORM:
+            return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+
+        closest, barycentric, _feature = triangle_closest_point(sample_0, sample_1, sample_2, point)
+        separation = point - closest
+        distance = wp.length(separation)
+        distance_tolerance = wp.max(
+            wp.max(_MIN_CONTACT_DISTANCE, 1.0e-4 * thickness),
+            maximum_motion * _CCD_TIME_TOLERANCE,
+        )
+        if distance <= thickness + distance_tolerance:
+            normal = normal_raw / normal_length
+            signed_distance = wp.dot(separation, normal)
+            side = float(1.0)
+            if one_sided != 0:
+                if signed_distance < -distance_tolerance:
+                    return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+            elif signed_distance < 0.0:
+                side = -1.0
+            if time <= _CCD_TIME_TOLERANCE:
+                separation_direction = side * normal
+                if distance > _MIN_CONTACT_DISTANCE:
+                    separation_direction = separation / distance
+                surface_displacement = (
+                    barycentric[0] * displacement_0 + barycentric[1] * displacement_1 + barycentric[2] * displacement_2
+                )
+                if wp.dot(surface_displacement, separation_direction) <= _MIN_CONTACT_DISTANCE:
+                    return False, float(2.0), wp.vec3(0.0), float(1.0e30), float(1.0)
+            final_closest, _final_barycentric, _final_feature = triangle_closest_point(
+                position_0,
+                position_1,
+                position_2,
+                point,
+            )
+            final_distance = wp.length(point - final_closest)
+            if not face_hit or time <= face_time:
+                return True, time, barycentric, final_distance, side
+            return face_hit, face_time, face_barycentric, face_final_distance, face_side
+
+        time += (distance - thickness) / maximum_motion
+        if time > 1.0 + _CCD_TIME_TOLERANCE:
+            break
+
+    return face_hit, face_time, face_barycentric, face_final_distance, face_side
+
+
+@wp.kernel
+def project_vertices_against_moving_triangles(
+    rigid_triangle_bvh_id: wp.uint64,
+    thickness: float,
+    cloth_previous_positions: wp.array[wp.vec3],
+    cloth_inertia_positions: wp.array[wp.vec3],
+    cloth_iterate_positions: wp.array[wp.vec3],
+    rigid_step_positions: wp.array[wp.vec3],
+    rigid_positions: wp.array[wp.vec3],
+    rigid_triangles: wp.array2d[int],
+    rigid_triangle_one_sided: wp.array[int],
+    binding_triangle_ids: wp.array[int],
+    binding_barycentrics: wp.array[wp.vec3],
+    binding_times: wp.array[float],
+    binding_count: wp.array[int],
+):
+    vertex = wp.tid()
+    point = cloth_previous_positions[vertex]
+    query = wp.bvh_query_aabb(
+        rigid_triangle_bvh_id,
+        point - wp.vec3(thickness),
+        point + wp.vec3(thickness),
+    )
+    triangle = wp.int32(-1)
+    best_triangle = wp.int32(-1)
+    best_time = float(2.0)
+    best_final_distance = float(1.0e30)
+    best_barycentric = wp.vec3(0.0)
+    best_side = float(1.0)
+    while wp.bvh_query_next(query, triangle):
+        index_0 = rigid_triangles[triangle, 0]
+        index_1 = rigid_triangles[triangle, 1]
+        index_2 = rigid_triangles[triangle, 2]
+        hit, time, barycentric, final_distance, side = _moving_triangle_vertex_ccd(
+            point,
+            rigid_step_positions[index_0],
+            rigid_step_positions[index_1],
+            rigid_step_positions[index_2],
+            rigid_positions[index_0],
+            rigid_positions[index_1],
+            rigid_positions[index_2],
+            thickness,
+            rigid_triangle_one_sided[triangle],
+        )
+        earlier = time < best_time - _CCD_TIME_TOLERANCE
+        tied_and_nearer = wp.abs(time - best_time) <= _CCD_TIME_TOLERANCE and final_distance < best_final_distance
+        if hit and (earlier or tied_and_nearer):
+            best_triangle = triangle
+            best_time = time
+            best_final_distance = final_distance
+            best_barycentric = barycentric
+            best_side = side
+
+    if best_triangle < 0:
+        return
+
+    index_0 = rigid_triangles[best_triangle, 0]
+    index_1 = rigid_triangles[best_triangle, 1]
+    index_2 = rigid_triangles[best_triangle, 2]
+    position_0 = rigid_positions[index_0]
+    position_1 = rigid_positions[index_1]
+    position_2 = rigid_positions[index_2]
+    final_normal_raw = wp.cross(position_1 - position_0, position_2 - position_0)
+    final_normal_length = wp.length(final_normal_raw)
+    if final_normal_length <= _MIN_GEOMETRY_NORM:
+        return
+    final_normal = best_side * final_normal_raw / final_normal_length
+    final_surface_point = (
+        best_barycentric[0] * position_0 + best_barycentric[1] * position_1 + best_barycentric[2] * position_2
+    )
+    target = final_surface_point + thickness * final_normal
+    displacement = target - point
+    cloth_previous_positions[vertex] += displacement
+    cloth_inertia_positions[vertex] += displacement
+    cloth_iterate_positions[vertex] += displacement
+    binding_triangle_ids[vertex] = best_triangle
+    binding_barycentrics[vertex] = best_barycentric
+    binding_times[vertex] = best_time
+    wp.atomic_add(binding_count, 0, 1)
 
 
 @wp.kernel
@@ -260,6 +530,8 @@ def detect_rigid_vertex_cloth_face(
     rigid_step_positions: wp.array[wp.vec3],
     rigid_predicted_positions: wp.array[wp.vec3],
     rigid_velocities: wp.array[wp.vec3],
+    rigid_vertex_cone_normals: wp.array2d[wp.vec3],
+    rigid_vertex_cone_counts: wp.array[int],
     contact_ids: wp.array2d[int],
     contact_weights: wp.array2d[float],
     contact_directions: wp.array[wp.vec3],
@@ -321,9 +593,21 @@ def detect_rigid_vertex_cloth_face(
         predicted_inside = (
             predicted_barycentric[0] >= 0.0 and predicted_barycentric[1] >= 0.0 and predicted_barycentric[2] >= 0.0
         )
-        if not current_inside and not predicted_inside:
+        current_owned = current_inside and _inside_feature_normal_cone(
+            projected - rigid_position,
+            rigid_vertex_cone_normals,
+            rigid_vertex,
+            rigid_vertex_cone_counts[rigid_vertex],
+        )
+        predicted_owned = predicted_inside and _inside_feature_normal_cone(
+            predicted_projected - rigid_predicted_position,
+            rigid_vertex_cone_normals,
+            rigid_vertex,
+            rigid_vertex_cone_counts[rigid_vertex],
+        )
+        if not current_owned and not predicted_owned:
             continue
-        if not current_inside:
+        if not current_owned:
             barycentric = predicted_barycentric
 
         contact = wp.atomic_add(contact_count, 0, 1)
@@ -356,6 +640,8 @@ def detect_cloth_edge_rigid_edge(
     rigid_predicted_positions: wp.array[wp.vec3],
     rigid_velocities: wp.array[wp.vec3],
     rigid_edges: wp.array2d[int],
+    rigid_edge_cone_normals: wp.array2d[wp.vec3],
+    rigid_edge_cone_counts: wp.array[int],
     contact_ids: wp.array2d[int],
     contact_weights: wp.array2d[float],
     contact_directions: wp.array[wp.vec3],
@@ -434,9 +720,33 @@ def detect_cloth_edge_rigid_edge(
             or predicted_rigid_parameter <= _MIN_CONTACT_DISTANCE
             or predicted_rigid_parameter >= 1.0 - _MIN_CONTACT_DISTANCE
         )
-        if not current_interior and not predicted_interior:
+        current_cloth_closest = wp.lerp(cloth_position_0, cloth_position_1, cloth_parameter)
+        current_rigid_closest = wp.lerp(rigid_position_0, rigid_position_1, rigid_parameter)
+        predicted_cloth_closest = wp.lerp(
+            cloth_predicted_position_0,
+            cloth_predicted_position_1,
+            predicted_cloth_parameter,
+        )
+        predicted_rigid_closest = wp.lerp(
+            rigid_predicted_position_0,
+            rigid_predicted_position_1,
+            predicted_rigid_parameter,
+        )
+        current_owned = current_interior and _inside_feature_normal_cone(
+            current_cloth_closest - current_rigid_closest,
+            rigid_edge_cone_normals,
+            rigid_edge,
+            rigid_edge_cone_counts[rigid_edge],
+        )
+        predicted_owned = predicted_interior and _inside_feature_normal_cone(
+            predicted_cloth_closest - predicted_rigid_closest,
+            rigid_edge_cone_normals,
+            rigid_edge,
+            rigid_edge_cone_counts[rigid_edge],
+        )
+        if not current_owned and not predicted_owned:
             continue
-        if not current_interior:
+        if not current_owned:
             cloth_parameter = predicted_cloth_parameter
             rigid_parameter = predicted_rigid_parameter
         cloth_closest = wp.lerp(cloth_position_0, cloth_position_1, cloth_parameter)
@@ -457,16 +767,6 @@ def detect_cloth_edge_rigid_edge(
             if wp.dot(direction, reference_direction) < 0.0:
                 direction = -direction
             signed_gap = wp.dot(separation, direction)
-        predicted_cloth_closest = wp.lerp(
-            cloth_predicted_position_0,
-            cloth_predicted_position_1,
-            predicted_cloth_parameter,
-        )
-        predicted_rigid_closest = wp.lerp(
-            rigid_predicted_position_0,
-            rigid_predicted_position_1,
-            predicted_rigid_parameter,
-        )
         predicted_signed_gap = wp.dot(predicted_cloth_closest - predicted_rigid_closest, reference_direction)
         if signed_gap >= thickness and predicted_signed_gap >= thickness:
             continue

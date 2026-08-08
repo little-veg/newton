@@ -33,6 +33,7 @@ from .kinematic_mesh_contact_kernels import (
     mollified_edge_edge_hessian_multiply,
     predict_positions,
     prepare_edge_edge_mollifier,
+    project_vertices_against_moving_triangles,
     update_edge_bounds,
     update_swept_edge_bounds,
     update_swept_triangle_bounds,
@@ -499,12 +500,35 @@ def _update_collider_vertices(
     world_velocities[vertex] = velocity_at_point(body_qd[body], world_position - center_of_mass)
 
 
+@wp.kernel
+def _update_collider_feature_normals(
+    local_normals: wp.array2d[wp.vec3],
+    body_indices: wp.array[int],
+    body_q: wp.array[wp.transform],
+    world_normals: wp.array2d[wp.vec3],
+):
+    feature, slot = wp.tid()
+    body = body_indices[feature]
+    local_normal = local_normals[feature, slot]
+    if body < 0:
+        world_normals[feature, slot] = local_normal
+        return
+    world_normals[feature, slot] = wp.quat_rotate(wp.transform_get_rotation(body_q[body]), local_normal)
+
+
 def _transform_points(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
     translation = transform[:3]
     vector = transform[3:6]
     scalar = transform[6]
     twice_cross = 2.0 * np.cross(vector, points)
     return points + scalar * twice_cross + np.cross(vector, twice_cross) + translation
+
+
+def _transform_vectors(vectors: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    vector = transform[3:6]
+    scalar = transform[6]
+    twice_cross = 2.0 * np.cross(vector, vectors)
+    return vectors + scalar * twice_cross + np.cross(vector, twice_cross)
 
 
 def _box_surface(half_extents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -542,6 +566,30 @@ def _box_surface(half_extents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return vertices, triangles
 
 
+def _box_vertex_normal_cones(vertices: np.ndarray, transform: np.ndarray) -> np.ndarray:
+    normals = np.sign(vertices)[:, :, None] * np.eye(3, dtype=np.float32)[None, :, :]
+    return _transform_vectors(normals.reshape((-1, 3)), transform).reshape((-1, 3, 3)).astype(np.float32)
+
+
+def _edge_normal_cones(
+    edges: np.ndarray,
+    vertex_normals: np.ndarray,
+    vertex_counts: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    edge_normals = np.zeros((len(edges), 3, 3), dtype=np.float32)
+    edge_counts = np.zeros(len(edges), dtype=np.int32)
+    for edge_index, edge in enumerate(edges):
+        vertex_0 = int(edge[2])
+        vertex_1 = int(edge[3])
+        count_0 = int(vertex_counts[vertex_0])
+        count_1 = int(vertex_counts[vertex_1])
+        for normal_0 in vertex_normals[vertex_0, :count_0]:
+            if any(np.dot(normal_0, normal_1) > 1.0 - 1.0e-5 for normal_1 in vertex_normals[vertex_1, :count_1]):
+                edge_normals[edge_index, edge_counts[edge_index]] = normal_0
+                edge_counts[edge_index] += 1
+    return edge_normals, edge_counts
+
+
 class ConstraintKinematicMeshContact:
     """Matrix-free cloth contact against selected kinematic rigid shapes.
 
@@ -564,6 +612,7 @@ class ConstraintKinematicMeshContact:
         friction: float,
         friction_epsilon: float,
         max_contacts: int = 32768,
+        enable_ccd: bool = False,
     ):
         """Create a kinematic triangle-surface contact operator.
 
@@ -576,6 +625,8 @@ class ConstraintKinematicMeshContact:
             friction: Coulomb friction coefficient.
             friction_epsilon: Relative-velocity regularization [m/s].
             max_contacts: Capacity of each contact stencil buffer.
+            enable_ccd: Whether to project cloth vertices through swept rigid
+                triangles before each cloth solve.
         """
         if not np.isfinite(thickness) or thickness <= 0.0:
             raise ValueError("thickness must be finite and positive")
@@ -606,12 +657,16 @@ class ConstraintKinematicMeshContact:
         self.friction = float(friction)
         self.friction_epsilon = float(friction_epsilon)
         self.max_contacts = int(max_contacts)
+        self.enable_ccd = bool(enable_ccd)
+        self.uses_projected_step_positions = self.enable_ccd
 
         shape_types = model.shape_type.numpy()
         shape_scales = model.shape_scale.numpy()
         shape_transforms = model.shape_transform.numpy()
         shape_bodies = model.shape_body.numpy()
         local_positions: list[np.ndarray] = []
+        vertex_cone_normals: list[np.ndarray] = []
+        vertex_cone_counts: list[np.ndarray] = []
         triangles: list[np.ndarray] = []
         triangle_one_sided: list[np.ndarray] = []
         bodies: list[np.ndarray] = []
@@ -626,8 +681,12 @@ class ConstraintKinematicMeshContact:
                     raise ValueError(f"shape {shape} has no mesh source")
                 vertices = np.asarray(source.vertices, dtype=np.float32) * shape_scales[shape]
                 shape_triangles = np.asarray(source.indices, dtype=np.int32).reshape((-1, 3))
+                shape_vertex_cone_normals = np.zeros((len(vertices), 3, 3), dtype=np.float32)
+                shape_vertex_cone_counts = np.zeros(len(vertices), dtype=np.int32)
             elif shape_type == GeoType.BOX:
                 vertices, shape_triangles = _box_surface(shape_scales[shape])
+                shape_vertex_cone_normals = _box_vertex_normal_cones(vertices, shape_transforms[shape])
+                shape_vertex_cone_counts = np.full(len(vertices), 3, dtype=np.int32)
             else:
                 raise ValueError(f"shape {shape} uses unsupported geometry {shape_type.name}")
 
@@ -640,22 +699,49 @@ class ConstraintKinematicMeshContact:
 
             transformed = _transform_points(vertices, shape_transforms[shape]).astype(np.float32)
             local_positions.append(transformed)
+            vertex_cone_normals.append(shape_vertex_cone_normals)
+            vertex_cone_counts.append(shape_vertex_cone_counts)
             triangles.append(shape_triangles + vertex_offset)
             triangle_one_sided.append(np.full(len(shape_triangles), int(shape_type == GeoType.BOX), dtype=np.int32))
             bodies.append(np.full(len(vertices), int(shape_bodies[shape]), dtype=np.int32))
             vertex_offset += len(vertices)
 
         local_positions_np = np.concatenate(local_positions, axis=0)
+        vertex_cone_normals_np = np.concatenate(vertex_cone_normals, axis=0)
+        vertex_cone_counts_np = np.concatenate(vertex_cone_counts, axis=0)
         triangles_np = np.concatenate(triangles, axis=0)
         triangle_one_sided_np = np.concatenate(triangle_one_sided, axis=0)
         bodies_np = np.concatenate(bodies, axis=0)
         edges_np = MeshAdjacency(triangles_np).edge_indices.astype(np.int32)
+        edge_cone_normals_np, edge_cone_counts_np = _edge_normal_cones(
+            edges_np,
+            vertex_cone_normals_np,
+            vertex_cone_counts_np,
+        )
+        edge_bodies_np = bodies_np[edges_np[:, 2]]
+        if np.any(edge_bodies_np != bodies_np[edges_np[:, 3]]):
+            raise ValueError("collider edge endpoints must belong to the same body")
 
         self.collider_local_positions = wp.array(local_positions_np, dtype=wp.vec3, device=self.device)
         self.collider_body = wp.array(bodies_np, dtype=wp.int32, device=self.device)
+        self._collider_local_vertex_cone_normals = wp.array(
+            vertex_cone_normals_np,
+            dtype=wp.vec3,
+            device=self.device,
+        )
+        self.collider_vertex_cone_normals = wp.clone(self._collider_local_vertex_cone_normals)
+        self.collider_vertex_cone_counts = wp.array(vertex_cone_counts_np, dtype=wp.int32, device=self.device)
         self.collider_triangles = wp.array(triangles_np, dtype=wp.int32, device=self.device)
         self.collider_triangle_one_sided = wp.array(triangle_one_sided_np, dtype=wp.int32, device=self.device)
         self.collider_edges = wp.array(edges_np, dtype=wp.int32, device=self.device)
+        self._collider_local_edge_cone_normals = wp.array(
+            edge_cone_normals_np,
+            dtype=wp.vec3,
+            device=self.device,
+        )
+        self.collider_edge_cone_normals = wp.clone(self._collider_local_edge_cone_normals)
+        self.collider_edge_cone_counts = wp.array(edge_cone_counts_np, dtype=wp.int32, device=self.device)
+        self.collider_edge_body = wp.array(edge_bodies_np, dtype=wp.int32, device=self.device)
         self.collider_positions = wp.clone(self.collider_local_positions)
         self.collider_velocities = wp.zeros_like(self.collider_local_positions)
         self._step_collider_positions = wp.clone(self.collider_positions)
@@ -695,6 +781,15 @@ class ConstraintKinematicMeshContact:
         self.cloth_vertex_face_contacts = _KinematicContactBuffer(1, max_contacts, self.particle_count, self.device)
         self.rigid_vertex_face_contacts = _KinematicContactBuffer(3, max_contacts, self.particle_count, self.device)
         self.edge_edge_contacts = _KinematicEdgeEdgeContactBuffer(max_contacts, self.particle_count, self.device)
+        self.ccd_triangle_ids: wp.array[int] | None = None
+        self.ccd_barycentrics: wp.array[wp.vec3] | None = None
+        self.ccd_times: wp.array[float] | None = None
+        self.ccd_binding_count: wp.array[int] | None = None
+        if self.enable_ccd:
+            self.ccd_triangle_ids = wp.full(self.particle_count, -1, dtype=wp.int32, device=self.device)
+            self.ccd_barycentrics = wp.zeros(self.particle_count, dtype=wp.vec3, device=self.device)
+            self.ccd_times = wp.zeros(self.particle_count, dtype=wp.float32, device=self.device)
+            self.ccd_binding_count = wp.zeros(1, dtype=wp.int32, device=self.device)
         self._velocities: wp.array[wp.vec3] | None = None
         self._anchor_positions: wp.array[wp.vec3] | None = None
         if self.friction > 0.0:
@@ -737,9 +832,105 @@ class ConstraintKinematicMeshContact:
             outputs=[self.collider_positions, self.collider_velocities],
             device=self.device,
         )
+        wp.launch(
+            _update_collider_feature_normals,
+            dim=(len(self.collider_local_positions), 3),
+            inputs=[
+                self._collider_local_vertex_cone_normals,
+                self.collider_body,
+                body_q,
+            ],
+            outputs=[self.collider_vertex_cone_normals],
+            device=self.device,
+        )
+        wp.launch(
+            _update_collider_feature_normals,
+            dim=(self.collider_edge_count, 3),
+            inputs=[
+                self._collider_local_edge_cone_normals,
+                self.collider_edge_body,
+                body_q,
+            ],
+            outputs=[self.collider_edge_cone_normals],
+            device=self.device,
+        )
         if not was_updated:
             self._step_collider_positions.assign(self.collider_positions)
         self._colliders_updated = True
+
+    def project_step(
+        self,
+        previous_positions: wp.array[wp.vec3],
+        inertia_positions: wp.array[wp.vec3],
+        iterate_positions: wp.array[wp.vec3],
+    ) -> None:
+        """Project cloth vertices through the completed rigid-body sweep.
+
+        The same displacement is applied to all solver-private step positions,
+        preserving the cloth's inertial displacement while moving the step
+        start outside the final rigid surface.
+
+        Args:
+            previous_positions: Solver-private step-start positions [m].
+            inertia_positions: Solver-private inertial targets [m].
+            iterate_positions: Solver-private Newton iterate positions [m].
+        """
+        self._validate_particle_vectors(
+            (previous_positions, "previous_positions"),
+            (inertia_positions, "inertia_positions"),
+            (iterate_positions, "iterate_positions"),
+        )
+        if not self.enable_ccd:
+            return
+        if not self._colliders_updated:
+            raise RuntimeError("update_colliders() must be called before project_step()")
+        if (
+            self.ccd_triangle_ids is None
+            or self.ccd_barycentrics is None
+            or self.ccd_times is None
+            or self.ccd_binding_count is None
+        ):
+            raise RuntimeError("CCD buffers are unavailable")
+        self.ccd_triangle_ids.fill_(-1)
+        self.ccd_barycentrics.zero_()
+        self.ccd_times.zero_()
+        self.ccd_binding_count.zero_()
+
+        wp.launch(
+            update_swept_triangle_bounds,
+            dim=self.collider_triangle_count,
+            inputs=[
+                self._step_collider_positions,
+                self.collider_positions,
+                self.collider_positions,
+                self.collider_triangles,
+            ],
+            outputs=[self.collider_triangle_lower_bounds, self.collider_triangle_upper_bounds],
+            device=self.device,
+        )
+        self.collider_triangle_bvh.refit()
+        wp.launch(
+            project_vertices_against_moving_triangles,
+            dim=self.particle_count,
+            inputs=[
+                self.collider_triangle_bvh.id,
+                self.thickness,
+                previous_positions,
+                inertia_positions,
+                iterate_positions,
+                self._step_collider_positions,
+                self.collider_positions,
+                self.collider_triangles,
+                self.collider_triangle_one_sided,
+            ],
+            outputs=[
+                self.ccd_triangle_ids,
+                self.ccd_barycentrics,
+                self.ccd_times,
+                self.ccd_binding_count,
+            ],
+            device=self.device,
+        )
 
     def begin_step(
         self,
@@ -836,6 +1027,8 @@ class ConstraintKinematicMeshContact:
                 self._step_collider_positions,
                 self._predicted_collider_positions,
                 self.collider_velocities,
+                self.collider_vertex_cone_normals,
+                self.collider_vertex_cone_counts,
             ],
             outputs=[
                 self.rigid_vertex_face_contacts.ids,
@@ -865,6 +1058,8 @@ class ConstraintKinematicMeshContact:
                 self._predicted_collider_positions,
                 self.collider_velocities,
                 self.collider_edges,
+                self.collider_edge_cone_normals,
+                self.collider_edge_cone_counts,
             ],
             outputs=[
                 self.edge_edge_contacts.ids,

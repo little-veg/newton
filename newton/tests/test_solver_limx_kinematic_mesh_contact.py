@@ -422,6 +422,230 @@ class TestConstraintKinematicMeshVF(unittest.TestCase):
             constraint.prepare(state.particle_q)
         return constraint, state
 
+    def _make_box_bottom_fixture(self, cloth_z: float):
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        shape = builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1)
+        positions = ((0.05, 0.05, cloth_z), (0.15, 0.05, cloth_z), (0.1, 0.15, cloth_z))
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in positions],
+            vel=[wp.vec3(0.0)] * 3,
+            mass=[1.0] * 3,
+            radius=[0.003] * 3,
+        )
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=self.device)
+        state = model.state()
+        constraint = newton.solvers.ConstraintKinematicMeshContact(
+            model=model,
+            shape_indices=[shape],
+            thickness=0.003,
+            stiffness=2.0e4,
+            normal_damping=0.5,
+            friction=0.0,
+            friction_epsilon=1.0e-2,
+            max_contacts=64,
+        )
+        constraint.update_colliders(state.body_q, state.body_qd)
+        constraint.begin_step(state.particle_q, state.particle_qd, 0.01)
+        return constraint, state
+
+    def _make_box_edge_fixture(self, cloth_z: float):
+        builder = newton.ModelBuilder()
+        body = builder.add_body()
+        shape = builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1)
+        positions = ((0.0, -0.15, cloth_z), (0.0, -0.05, cloth_z), (0.001, -0.15, cloth_z))
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in positions],
+            vel=[wp.vec3(0.0)] * 3,
+            mass=[1.0] * 3,
+            radius=[0.003] * 3,
+        )
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=self.device)
+        state = model.state()
+        constraint = newton.solvers.ConstraintKinematicMeshContact(
+            model=model,
+            shape_indices=[shape],
+            thickness=0.003,
+            stiffness=2.0e4,
+            normal_damping=0.5,
+            friction=0.0,
+            friction_epsilon=1.0e-2,
+            max_contacts=64,
+        )
+        constraint.update_colliders(state.body_q, state.body_qd)
+        constraint.begin_step(state.particle_q, state.particle_qd, 0.01)
+        return constraint, state
+
+    def _target_edge_contact_count(self, constraint) -> int:
+        contacts = constraint.edge_edge_contacts
+        count = min(int(contacts.count.numpy()[0]), contacts.capacity)
+        ids = np.sort(contacts.ids.numpy()[:count], axis=1)
+        return int(np.count_nonzero(np.all(ids == (0, 1), axis=1)))
+
+    def _make_moving_box_ccd_fixture(self, start_x: float = -0.2):
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = builder.add_body(xform=wp.transform(wp.vec3(start_x, 0.0, 0.0), wp.quat_identity()))
+        shape = builder.add_shape_box(body=body, hx=0.1, hy=0.1, hz=0.1)
+        cloth_positions = np.asarray(((0.0, 0.0, 0.0), (0.0, 2.0, 0.0), (0.0, 0.0, 2.0)), dtype=np.float32)
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in cloth_positions],
+            vel=[wp.vec3(0.0)] * 3,
+            mass=[1.0] * 3,
+            radius=[0.003] * 3,
+        )
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=self.device)
+        state = model.state()
+        constraint = newton.solvers.ConstraintKinematicMeshContact(
+            model=model,
+            shape_indices=[shape],
+            thickness=0.003,
+            stiffness=2.0e4,
+            normal_damping=0.5,
+            friction=0.0,
+            friction_epsilon=1.0e-2,
+            max_contacts=64,
+            enable_ccd=True,
+        )
+        constraint.update_colliders(state.body_q, state.body_qd)
+        return constraint, state, cloth_positions, model
+
+    def test_ccd_binds_vertex_once_when_box_sweeps_completely_through_it(self):
+        """Bind one triangle when a moving box tunnels through a stationary vertex."""
+        constraint, state, cloth_positions, _model = self._make_moving_box_ccd_fixture()
+        state.body_q.assign([wp.transform(wp.vec3(0.2, 0.0, 0.0), wp.quat_identity())])
+        constraint.update_colliders(state.body_q, state.body_qd)
+        previous = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        inertia_np = cloth_positions.copy()
+        inertia_np[0, 1] += 0.02
+        inertia = wp.array(inertia_np, dtype=wp.vec3, device=self.device)
+        iterate = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+
+        constraint.project_step(previous, inertia, iterate)
+
+        projected = previous.numpy()
+        self.assertEqual(int(constraint.ccd_binding_count.numpy()[0]), 1)
+        self.assertGreaterEqual(float(projected[0, 0]), 0.303 - 1.0e-5)
+        np.testing.assert_allclose(projected[0, 1:], (0.0, 0.0), rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(projected[1:], cloth_positions[1:], rtol=0.0, atol=0.0)
+        np.testing.assert_allclose(iterate.numpy(), projected, rtol=0.0, atol=1.0e-6)
+        np.testing.assert_allclose(inertia.numpy()[0] - projected[0], (0.0, 0.02, 0.0), rtol=0.0, atol=1.0e-6)
+        self.assertGreaterEqual(int(constraint.ccd_triangle_ids.numpy()[0]), 0)
+        np.testing.assert_array_equal(constraint.ccd_triangle_ids.numpy()[1:], (-1, -1))
+
+        constraint.update_colliders(state.body_q, state.body_qd)
+        constraint.project_step(previous, inertia, iterate)
+
+        self.assertEqual(int(constraint.ccd_binding_count.numpy()[0]), 0)
+        np.testing.assert_array_equal(constraint.ccd_triangle_ids.numpy(), (-1, -1, -1))
+
+    def test_ccd_skips_stationary_collider(self):
+        """Leave cloth unchanged when the collider has no swept motion."""
+        constraint, _state, cloth_positions, _model = self._make_moving_box_ccd_fixture()
+        previous = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        inertia = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        iterate = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+
+        constraint.project_step(previous, inertia, iterate)
+
+        self.assertEqual(int(constraint.ccd_binding_count.numpy()[0]), 0)
+        np.testing.assert_allclose(previous.numpy(), cloth_positions, rtol=0.0, atol=0.0)
+        np.testing.assert_array_equal(constraint.ccd_triangle_ids.numpy(), (-1, -1, -1))
+
+    def test_ccd_does_not_bind_a_touching_surface_moving_away(self):
+        """Release a touching vertex when the rigid surface moves away."""
+        constraint, state, cloth_positions, _model = self._make_moving_box_ccd_fixture(start_x=-0.103)
+        state.body_q.assign([wp.transform(wp.vec3(-0.2, 0.0, 0.0), wp.quat_identity())])
+        constraint.update_colliders(state.body_q, state.body_qd)
+        previous = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        inertia = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        iterate = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+
+        constraint.project_step(previous, inertia, iterate)
+
+        self.assertEqual(int(constraint.ccd_binding_count.numpy()[0]), 0)
+        np.testing.assert_allclose(previous.numpy(), cloth_positions, rtol=0.0, atol=0.0)
+
+    def test_ccd_does_not_bind_a_touching_surface_moving_tangentially(self):
+        """Leave tangential touching motion to the friction model."""
+        constraint, state, cloth_positions, _model = self._make_moving_box_ccd_fixture(start_x=-0.103)
+        state.body_q.assign([wp.transform(wp.vec3(-0.103, 0.05, 0.0), wp.quat_identity())])
+        constraint.update_colliders(state.body_q, state.body_qd)
+        previous = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        inertia = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        iterate = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+
+        constraint.project_step(previous, inertia, iterate)
+
+        self.assertEqual(int(constraint.ccd_binding_count.numpy()[0]), 0)
+        np.testing.assert_allclose(previous.numpy(), cloth_positions, rtol=0.0, atol=0.0)
+
+    def test_ccd_detects_normal_crossing_with_dominant_tangential_motion(self):
+        """Detect a slow normal crossing despite much larger tangential motion."""
+        builder = newton.ModelBuilder(gravity=(0.0, 0.0, 0.0))
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, -0.005), wp.quat_identity()))
+        mesh = newton.Mesh(
+            vertices=np.asarray(((-10.0, -10.0, 0.0), (10.0, -10.0, 0.0), (0.0, 10.0, 0.0)), dtype=np.float32),
+            indices=np.asarray((0, 1, 2), dtype=np.int32),
+            compute_inertia=False,
+        )
+        shape = builder.add_shape_mesh(body=body, mesh=mesh)
+        cloth_positions = np.asarray(((0.0, 0.0, 0.0), (0.0, 20.0, 0.0), (0.0, 0.0, 20.0)), dtype=np.float32)
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in cloth_positions],
+            vel=[wp.vec3(0.0)] * 3,
+            mass=[1.0] * 3,
+            radius=[0.003] * 3,
+        )
+        builder.add_triangle(0, 1, 2)
+        model = builder.finalize(device=self.device)
+        state = model.state()
+        constraint = newton.solvers.ConstraintKinematicMeshContact(
+            model=model,
+            shape_indices=[shape],
+            thickness=0.003,
+            stiffness=2.0e4,
+            normal_damping=0.5,
+            friction=0.0,
+            friction_epsilon=1.0e-2,
+            max_contacts=64,
+            enable_ccd=True,
+        )
+        constraint.update_colliders(state.body_q, state.body_qd)
+        state.body_q.assign([wp.transform(wp.vec3(1.0, 0.0, 0.005), wp.quat_identity())])
+        constraint.update_colliders(state.body_q, state.body_qd)
+        previous = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        inertia = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+        iterate = wp.array(cloth_positions, dtype=wp.vec3, device=self.device)
+
+        constraint.project_step(previous, inertia, iterate)
+
+        self.assertEqual(int(constraint.ccd_binding_count.numpy()[0]), 1)
+        self.assertAlmostEqual(float(constraint.ccd_times.numpy()[0]), 0.2, delta=2.0e-3)
+        self.assertGreaterEqual(float(previous.numpy()[0, 2]), 0.008 - 1.0e-5)
+
+    def test_solver_applies_ccd_projection_without_mutating_input_state(self):
+        """Apply rigid-sweep CCD before solving cloth while preserving state input."""
+        constraint, state_0, cloth_positions, model = self._make_moving_box_ccd_fixture()
+        state_1 = model.state()
+        state_0.body_q.assign([wp.transform(wp.vec3(0.2, 0.0, 0.0), wp.quat_identity())])
+        constraint.update_colliders(state_0.body_q, state_0.body_qd)
+        solver = newton.solvers.SolverLIMX(
+            model,
+            [],
+            nonlinear_iterations=1,
+            linear_iterations=8,
+            dynamic_operator=constraint,
+        )
+
+        solver.step(state_0, state_1, model.control(), None, 0.01)
+
+        np.testing.assert_allclose(state_0.particle_q.numpy(), cloth_positions, rtol=0.0, atol=0.0)
+        self.assertEqual(int(constraint.ccd_binding_count.numpy()[0]), 1)
+        self.assertGreater(float(state_1.particle_q.numpy()[0, 0]), 0.29)
+
     def test_keeps_cloth_vertex_contact_on_step_start_side_after_crossing(self):
         """Keep a swept cloth vertex on its step-start side of a rigid face."""
         constraint, _state = self._make_vf_fixture(
@@ -578,6 +802,38 @@ class TestConstraintKinematicMeshVF(unittest.TestCase):
 
         self.assertTrue(np.any(vertex_contacts))
         self.assertGreater(float(depths[vertex_contacts].max()), constraint.thickness)
+
+    def test_rejects_box_bottom_vertices_from_their_inward_side(self):
+        """Reject reverse VF contacts viewed through a box vertex's inward side."""
+        constraint, state = self._make_box_bottom_fixture(cloth_z=-0.099)
+
+        constraint.prepare(state.particle_q)
+
+        self.assertEqual(int(constraint.rigid_vertex_face_contacts.count.numpy()[0]), 0)
+
+    def test_keeps_box_bottom_vertices_from_their_outward_side(self):
+        """Keep reverse VF contacts in a box vertex's outward normal cone."""
+        constraint, state = self._make_box_bottom_fixture(cloth_z=-0.101)
+
+        constraint.prepare(state.particle_q)
+
+        self.assertGreater(int(constraint.rigid_vertex_face_contacts.count.numpy()[0]), 0)
+
+    def test_rejects_box_bottom_edge_from_its_inward_side(self):
+        """Reject EE contacts outside a box edge's outward normal cone."""
+        constraint, state = self._make_box_edge_fixture(cloth_z=-0.099)
+
+        constraint.prepare(state.particle_q)
+
+        self.assertEqual(self._target_edge_contact_count(constraint), 0)
+
+    def test_keeps_box_bottom_edge_from_its_outward_side(self):
+        """Keep EE contacts inside a box edge's outward normal cone."""
+        constraint, state = self._make_box_edge_fixture(cloth_z=-0.101)
+
+        constraint.prepare(state.particle_q)
+
+        self.assertGreater(self._target_edge_contact_count(constraint), 0)
 
     def test_detects_cloth_vertex_against_rigid_face(self):
         """Detect an interior cloth-vertex/rigid-face contact."""

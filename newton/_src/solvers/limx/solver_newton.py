@@ -200,9 +200,25 @@ class SolverLIMX(SolverBase):
             device=self.device,
         )
 
+        project_dynamic_step = getattr(self.dynamic_operator, "project_step", None)
+        if project_dynamic_step is not None:
+            project_dynamic_step(self.previous_positions, self.inertia_positions, self.iterate_positions)
+
         begin_dynamic_step = getattr(self.dynamic_operator, "begin_step", None)
         if begin_dynamic_step is not None:
-            begin_dynamic_step(state_in.particle_q, state_in.particle_qd, dt)
+            begin_projected_step = getattr(self.dynamic_operator, "begin_step_projected", None)
+            if begin_projected_step is not None:
+                begin_projected_step(
+                    state_in.particle_q,
+                    self.previous_positions,
+                    state_in.particle_qd,
+                    dt,
+                )
+            else:
+                begin_step_positions = state_in.particle_q
+                if bool(getattr(self.dynamic_operator, "uses_projected_step_positions", False)):
+                    begin_step_positions = self.previous_positions
+                begin_dynamic_step(begin_step_positions, state_in.particle_qd, dt)
 
         inv_dt_squared = 1.0 / (dt * dt)
         for nonlinear_iteration in range(self.nonlinear_iterations):

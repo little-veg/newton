@@ -101,6 +101,64 @@ class TestConstraintGroupDynamic(unittest.TestCase):
 
         self.assertEqual(bindings, [(static_diagonal, masses)])
 
+    def test_begin_step_selects_original_or_projected_positions_per_child(self):
+        """Route projected positions only to dynamic constraints that request them."""
+        device = wp.get_device("cuda:0")
+        received = {}
+
+        class Constraint:
+            particle_count = 2
+            uses_projected_step_positions = False
+
+            def __init__(self, name):
+                self.name = name
+                self.device = device
+
+            def begin_step(self, positions, velocities, dt):
+                received[self.name] = positions
+
+        projected_constraint = Constraint("projected")
+        projected_constraint.uses_projected_step_positions = True
+        group = newton.solvers.ConstraintGroupDynamic([Constraint("original"), projected_constraint])
+        original = wp.zeros(2, dtype=wp.vec3, device=device)
+        projected = wp.ones(2, dtype=wp.vec3, device=device)
+        velocities = wp.zeros_like(original)
+
+        group.begin_step_projected(original, projected, velocities, 0.01)
+
+        self.assertIs(received["original"], original)
+        self.assertIs(received["projected"], projected)
+
+    def test_begin_step_preserves_child_routing_through_nested_groups(self):
+        """Route original positions through nested mixed dynamic groups."""
+        device = wp.get_device("cuda:0")
+        received = {}
+
+        class Constraint:
+            particle_count = 2
+            uses_projected_step_positions = False
+
+            def __init__(self, name, uses_projected_positions=False):
+                self.name = name
+                self.device = device
+                self.uses_projected_step_positions = uses_projected_positions
+
+            def begin_step(self, positions, velocities, dt):
+                received[self.name] = positions
+
+        group_type = newton.solvers.ConstraintGroupDynamic
+        nested = group_type([Constraint("nested_original"), Constraint("nested_projected", True)])
+        outer = group_type([Constraint("outer_original"), nested])
+        original = wp.zeros(2, dtype=wp.vec3, device=device)
+        projected = wp.ones(2, dtype=wp.vec3, device=device)
+        velocities = wp.zeros_like(original)
+
+        outer.begin_step_projected(original, projected, velocities, 0.01)
+
+        self.assertIs(received["outer_original"], original)
+        self.assertIs(received["nested_original"], original)
+        self.assertIs(received["nested_projected"], projected)
+
 
 @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
 class TestConstraintStaticPlaneContact(unittest.TestCase):
