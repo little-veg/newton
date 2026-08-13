@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 from typing import Any
+from unittest import mock
 
 import warp as wp
 
@@ -227,10 +228,10 @@ def add_example_test(
             options.pop("viewer", None)
             options.pop("stage_path", None)
 
-        command.extend(_build_command_line_options(options))
-
-        # Set the test timeout in seconds
+        # Set the test timeout in seconds without forwarding it to the example.
         test_timeout = options.pop("test_timeout", 600)
+
+        command.extend(_build_command_line_options(options))
 
         # Can set active=True when tuning the test parameters
         with wp.ScopedTimer(f"{name}_{sanitize_identifier(device)}", active=False):
@@ -306,6 +307,33 @@ class TestExampleOutputRegexes(unittest.TestCase):
         unmatched_output = re.sub(_BASIC_PLOTTING_OUTPUT_RE, "", output, flags=re.MULTILINE)
 
         self.assertEqual(unmatched_output, unexpected_output)
+
+
+class TestExampleRunnerOptions(unittest.TestCase):
+    def test_keeps_runner_timeout_out_of_example_options(self):
+        """Keep runner-only timeouts out of example command lines."""
+
+        class TimeoutProbe(unittest.TestCase):
+            pass
+
+        add_example_test(
+            TimeoutProbe,
+            name="basic.example_basic_pendulum",
+            devices=["cpu"],
+            test_options={"test_timeout": 900},
+            use_viewer=True,
+            test_suffix="timeout_probe",
+        )
+        test_name = "test_basic.example_basic_pendulum_timeout_probe_cpu"
+        probe = TimeoutProbe(test_name)
+        completed = subprocess.CompletedProcess([], 0, "", "")
+
+        with mock.patch.object(subprocess, "run", return_value=completed) as run_mock:
+            getattr(probe, test_name)()
+
+        command = run_mock.call_args.args[0]
+        self.assertEqual(run_mock.call_args.kwargs["timeout"], 900)
+        self.assertNotIn("--test-timeout", command)
 
 
 cuda_test_devices = get_selected_cuda_test_devices(mode="basic")  # Don't test on multiple GPUs to save time
@@ -645,7 +673,7 @@ add_example_test(
     TestRobotExamples,
     name="robot.example_robot_mobile_aloha",
     devices=cuda_test_devices,
-    test_options={"num-frames": 180},
+    test_options={"num-frames": 180, "test_timeout": 900},
     use_viewer=True,
 )
 
