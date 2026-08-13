@@ -7,7 +7,7 @@ import numpy as np
 import warp as wp
 
 from ..core.types import Axis
-from .download_assets import clear_git_cache, download_asset
+from .download_assets import clear_git_cache, download_asset, download_git_folder
 from .texture import load_texture, normalize_texture
 from .topology import topological_sort, topological_sort_undirected
 
@@ -119,6 +119,7 @@ __all__ = [
     "clear_git_cache",
     "compute_world_offsets",
     "download_asset",
+    "download_git_folder",
     "is_graph_capture_allocation_enabled",
     "load_texture",
     "normalize_texture",

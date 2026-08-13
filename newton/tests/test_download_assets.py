@@ -111,6 +111,27 @@ class TestDownloadAssets(unittest.TestCase):
         self.assertEqual(cache_dir_2, cache_dir_3)
         self.assertEqual((p3 / "foo.txt").read_text(encoding="utf-8"), "v2\n")
 
+    def test_public_root_download_by_commit(self):
+        """Download and reuse a complete repository root through the public API."""
+        import newton.utils
+
+        nested = Path(self.work_dir, "piper_description", "meshes")
+        nested.mkdir(parents=True)
+        (nested / "link.stl").write_text("mesh\n", encoding="utf-8")
+        self.work.index.add([str(nested / "link.stl")])
+        commit = self.work.index.commit("add nested package").hexsha
+        self.work.git.push("origin", "main")
+
+        root = newton.utils.download_git_folder(self.remote_dir, ".", cache_dir=self.cache_dir, ref=commit)
+        self.assertEqual((root / "piper_description/meshes/link.stl").read_text(), "mesh\n")
+
+        with mock.patch(
+            "newton._src.utils.download_assets._get_latest_commit_via_git",
+            return_value=None,
+        ):
+            cached = newton.utils.download_git_folder(self.remote_dir, ".", cache_dir=self.cache_dir, ref=commit)
+        self.assertEqual(cached.resolve(), root.resolve())
+
     def test_concurrent_download(self):
         """Multiple threads downloading the same asset do not corrupt the cache."""
 

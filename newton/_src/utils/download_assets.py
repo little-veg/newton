@@ -250,7 +250,8 @@ def download_git_folder(
 
     Args:
         git_url: The git repository URL (HTTPS or SSH).
-        folder_path: Path to the folder within the repository.
+        folder_path: Path to the folder within the repository. Use ``"."``
+            to download the complete repository root.
         cache_dir: Directory to cache downloads.  If ``None``, determined by
             ``NEWTON_CACHE_PATH`` env-var or the system user cache directory.
         ref: Git branch, tag, or commit SHA to checkout (default: ``"main"``).
@@ -368,30 +369,34 @@ def download_git_folder(
         print(f"Cloning {git_url} (ref: {ref})...")
 
         is_sha = bool(_SHA_RE.fullmatch(ref))
+        is_repo_root = folder_path == "."
         if is_sha:
             # Single fetch — skip the clone, which would download the
             # default-branch tip only to throw it away.
             repo = gitpython.Repo.init(temp_dir)
             try:
                 repo.create_remote("origin", git_url)
-                repo.git.sparse_checkout("init")
-                repo.git.sparse_checkout("set", folder_path)
+                if not is_repo_root:
+                    repo.git.sparse_checkout("init")
+                    repo.git.sparse_checkout("set", folder_path)
                 repo.git.fetch("origin", ref, "--depth=1", "--filter=blob:none")
                 repo.git.checkout("FETCH_HEAD")
             finally:
                 repo.close()
         else:
-            repo = gitpython.Repo.clone_from(
-                git_url,
-                temp_dir,
-                branch=ref,
-                depth=1,
-                no_checkout=True,
-                multi_options=["--filter=blob:none", "--sparse"],
-            )
+            clone_kwargs = {
+                "branch": ref,
+                "depth": 1,
+                "multi_options": ["--filter=blob:none"],
+            }
+            if not is_repo_root:
+                clone_kwargs["no_checkout"] = True
+                clone_kwargs["multi_options"].append("--sparse")
+            repo = gitpython.Repo.clone_from(git_url, temp_dir, **clone_kwargs)
             try:
-                repo.git.sparse_checkout("set", folder_path)
-                repo.git.checkout(ref)
+                if not is_repo_root:
+                    repo.git.sparse_checkout("set", folder_path)
+                    repo.git.checkout(ref)
             finally:
                 repo.close()
 
