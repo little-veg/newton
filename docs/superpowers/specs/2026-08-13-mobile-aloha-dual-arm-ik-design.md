@@ -215,6 +215,45 @@ The viewer Reset action reconstructs only simulation and controller state. It
 reuses the cached asset checkout and must not re-download the 179 MB upstream
 repository when the pinned revision is already available.
 
+## CUDA Graph Execution
+
+Preserve the validated control and dynamics schedule: 24 LM iterations and ten
+MuJoCo substeps per 60 Hz frame. Optimize repeated execution rather than
+reducing either count.
+
+After the IK objectives, solver, states, and control buffers are fully
+constructed, capture two independent CUDA graphs:
+
+1. `graph_ik` contains one complete 24-iteration `IKSolver.step()` operating
+   in place on the persistent `joint_q_ik` buffer;
+2. `graph_sim` contains the ten force-clear, MuJoCo-step, and state-swap
+   operations for one rendered frame.
+
+The per-frame CPU path updates objective target arrays before launching
+`graph_ik`, reads and validates the completed IK coordinates, updates the
+persistent control target buffer, then launches `graph_sim`. The graph nodes
+therefore always consume current gizmo, gripper, and joint-target data even
+though their kernel topology is reused. The fixed even substep count leaves
+the Python `state_0` and `state_1` references in their original order after
+capture and after every graph launch.
+
+Capture only on CUDA devices. A non-CUDA device keeps the direct IK and
+simulation calls with identical numerical parameters. Do not silently fall
+back after a CUDA capture error; surface the error because a partial graph
+configuration would make the performance behavior ambiguous.
+
+Cache the immutable joint-limit arrays and a host-side copy of
+`control.joint_target_q` during initialization. Update that authoritative host
+copy and upload it each frame instead of downloading the unchanged control
+array and model limits repeatedly. Keep the unavoidable IK-result and TCP-state
+readbacks because arm command validation and interactive error display consume
+those values on the CPU. Do not add explicit synchronization before
+`.numpy()`; the copy already synchronizes.
+
+The optimization must not change joint gains, damping, velocity limits,
+tracking tolerances, gizmo behavior, or the rule that only `Control` targets
+are written by IK.
+
 ## Components and Files
 
 Implementation is confined to these responsibilities:
@@ -289,6 +328,14 @@ rotation. Hold the target for 180 rendered frames.
 The test must fail if IK is bypassed by assigning dynamic joint state directly.
 The example updates only `Control` targets; `State.joint_q` and
 `State.joint_qd` are outputs of `SolverMuJoCo`.
+
+The CUDA integration test additionally requires both captured graphs to exist,
+keeps `ik_iterations == 24` and `sim_substeps == 10`, and completes the same
+180-frame tracking assertions through the graph-launch path. Performance is
+measured separately after warmup rather than asserted by wall-clock time in
+CI. On the reference RTX 5090, compare captured and uncaptured execution of the
+same 24-iteration IK and ten-substep simulation sequences; each captured core
+sequence must be at least three times faster before rendering.
 
 ### Visual Acceptance
 
