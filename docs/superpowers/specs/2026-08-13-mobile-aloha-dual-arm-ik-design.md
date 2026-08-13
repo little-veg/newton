@@ -81,7 +81,7 @@ Read the combined URDF as XML and create an in-memory normalized XML string
 before calling `ModelBuilder.add_urdf()`. Do not modify either the downloaded
 cache checkout or a user-provided asset checkout.
 
-Normalization performs two operations:
+Normalization performs three operations:
 
 1. Change these nine joints to `fixed`:
    `fr_steering_joint`, `fr_wheel`, `fl_steering_joint`, `fl_wheel`,
@@ -89,6 +89,10 @@ Normalization performs two operations:
    `lifting_joint`.
 2. Resolve every `package://<package>/<path>` filename attribute to an absolute
    file path below the validated asset root.
+3. Neutralize the upstream ROS/Assimp COLLADA compensation scale when a DAE
+   declares a metric unit and its explicit uniform URDF scale is exactly that
+   unit's reciprocal. Newton already applies the COLLADA unit, so retaining the
+   reciprocal scale would enlarge the affected chassis meshes by 1000x.
 
 Every named lock joint must exist exactly once. Every package URI must use one
 of the two validated packages and resolve to an existing file. Missing or
@@ -96,11 +100,12 @@ duplicate lock joints, unsupported package names, and missing referenced files
 raise descriptive errors before model construction.
 
 Import the normalized XML with `floating=False`,
-`collapse_fixed_joints=True`, `enable_self_collisions=False`, and
-`parse_visuals_as_colliders=False`. Fixed-joint collapsing preserves the full
-visual geometry while removing the base-mechanism degrees of freedom. The
-remaining actuated joints are exactly the twelve arm revolute joints and four
-finger prismatic joints.
+`collapse_fixed_joints=False`, `enable_self_collisions=False`, and
+`parse_visuals_as_colliders=False`, then call selective fixed-joint collapse
+while retaining the generated world-to-`base_link` fixed joint. This preserves
+a concrete fixed root for drift checks while merging the steering, wheel,
+lift, sensor, and arm-mount fixed chains. The remaining actuated joints are
+exactly the twelve arm revolute joints and four finger prismatic joints.
 
 ## Initial State and Joint Mapping
 
@@ -248,7 +253,8 @@ Use `unittest` and test-first implementation.
 2. Normalize a synthetic URDF containing all nine base-mechanism joints, one
    left arm joint, one right arm joint, and package mesh references. Verify the
    nine selected types become `fixed`, arm types remain unchanged, every URI
-   becomes an absolute existing path, and the input file is unchanged.
+   becomes an absolute existing path, inverse COLLADA unit-compensation scale
+   is neutralized, and the input file is unchanged.
 3. Verify missing and duplicate lock joints, unsupported packages, and missing
    mesh files each raise a descriptive exception.
 4. Verify joint-label lookup rejects missing or duplicate required labels.

@@ -49,7 +49,12 @@ class TestMobileAlohaHelpers(unittest.TestCase):
         urdf_dir.mkdir(parents=True)
         split_mesh_dir.mkdir(parents=True)
         piper_mesh_dir.mkdir(parents=True)
-        (split_mesh_dir / "base.dae").write_text("mesh\n", encoding="utf-8")
+        (split_mesh_dir / "base.dae").write_text(
+            '<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema">'
+            '<asset><unit meter="0.001" name="millimeter"/></asset>'
+            "</COLLADA>\n",
+            encoding="utf-8",
+        )
         (piper_mesh_dir / "link.stl").write_text("mesh\n", encoding="utf-8")
 
         robot = ET.Element("robot", name="synthetic_mobile_aloha")
@@ -66,6 +71,7 @@ class TestMobileAlohaHelpers(unittest.TestCase):
             ET.SubElement(base_link, "visual"),
             "mesh",
             filename="package://split_aloha_mid_360/meshes/base.dae",
+            scale="1000 1000 1000",
         )
 
         urdf_path = urdf_dir / "split_aloha_mid_360_with_piper.urdf"
@@ -92,6 +98,8 @@ class TestMobileAlohaHelpers(unittest.TestCase):
             filename = Path(mesh.get("filename"))
             self.assertTrue(filename.is_absolute())
             self.assertTrue(filename.is_file())
+            if filename.name == "base.dae":
+                self.assertEqual(mesh.get("scale"), "1 1 1")
         self.assertEqual(self.urdf_path.read_text(encoding="utf-8"), source_xml)
 
     def test_rejects_incomplete_mobile_aloha_assets(self):

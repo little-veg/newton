@@ -105,6 +105,16 @@ def normalize_mobile_aloha_urdf(asset_root: str | Path) -> str:
             raise FileNotFoundError(f"Mobile ALOHA mesh is missing: {mesh_path}")
         mesh.set("filename", str(mesh_path))
 
+        scale_text = mesh.get("scale")
+        if mesh_path.suffix.lower() == ".dae" and scale_text is not None:
+            scale = np.asarray([float(value) for value in scale_text.split()], dtype=np.float64)
+            collada_root = ET.parse(mesh_path).getroot()
+            unit = collada_root.find("{*}asset/{*}unit")
+            if unit is not None and unit.get("meter") is not None:
+                meter = float(unit.get("meter"))
+                if scale.shape == (3,) and meter > 0.0 and np.allclose(scale * meter, 1.0):
+                    mesh.set("scale", " ".join(f"{value:g}" for value in scale * meter))
+
     return ET.tostring(urdf_root, encoding="unicode")
 
 
@@ -351,7 +361,7 @@ class Example:
         self.tcp_rotation_errors = [0.0, 0.0]
 
         self.viewer.set_model(self.model)
-        self.viewer.set_camera(wp.vec3(3.2, -4.0, 2.4), -12.0, 142.0)
+        self.viewer.set_camera(wp.vec3(2.0, -2.4, 1.7), -16.0, 126.1)
 
     def _push_ik_targets(self):
         for index, transform in enumerate(self.target_tcp_transforms):
