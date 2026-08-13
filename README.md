@@ -269,6 +269,22 @@ If you run the examples from a source checkout with uv, use
     </td>
   </tr>
   <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/robot/example_robot_mobile_aloha.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_robot_mobile_aloha.jpg" alt="Mobile ALOHA Dual-Arm IK">
+      </a>
+    </td>
+    <td width="33%"></td>
+    <td width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>python -m newton.examples robot_mobile_aloha</code>
+    </td>
+    <td width="33%"></td>
+    <td width="33%"></td>
+  </tr>
+  <tr>
     <td colspan="3"><h3>Cable Examples</h3></td>
   </tr>
   <tr>
