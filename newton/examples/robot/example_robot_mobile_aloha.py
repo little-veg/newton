@@ -352,9 +352,14 @@ class Example:
         self.last_valid_ik_q = initial_joint_q.copy()
         self.joint_q_ik = wp.array(initial_joint_q[None, :], dtype=wp.float32, device=self.model.device)
 
-        self.arm_lower_limits = self.model.joint_limit_lower.numpy()[self.arm_dof_indices]
-        self.arm_upper_limits = self.model.joint_limit_upper.numpy()[self.arm_dof_indices]
+        joint_limit_lower = self.model.joint_limit_lower.numpy()
+        joint_limit_upper = self.model.joint_limit_upper.numpy()
+        self.arm_lower_limits = joint_limit_lower[self.arm_dof_indices]
+        self.arm_upper_limits = joint_limit_upper[self.arm_dof_indices]
         self.arm_velocity_limits = self.model.joint_velocity_limit.numpy()[self.arm_dof_indices]
+        self.finger_lower_limits = joint_limit_lower[self.finger_dof_indices]
+        self.finger_upper_limits = joint_limit_upper[self.finger_dof_indices]
+        self.control_target_q = self.control.joint_target_q.numpy()
         self.previous_arm_targets = initial_joint_q[self.arm_coord_indices].astype(np.float64)
         self.max_arm_target_increments = np.zeros(len(self.arm_coord_indices), dtype=np.float64)
         self.tcp_position_errors = [0.02 if self.test_mode else 0.0, 0.02 if self.test_mode else 0.0]
@@ -362,6 +367,28 @@ class Example:
 
         self.viewer.set_model(self.model)
         self.viewer.set_camera(wp.vec3(2.0, -2.4, 1.7), -16.0, 126.1)
+        self.capture()
+
+    def capture(self):
+        self.graph_ik = None
+        self.graph_sim = None
+        if not self.model.device.is_cuda:
+            return
+
+        with wp.ScopedCapture(device=self.model.device) as capture:
+            self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iterations)
+        self.graph_ik = capture.graph
+
+        with wp.ScopedCapture(device=self.model.device) as capture:
+            self.simulate()
+        self.graph_sim = capture.graph
+
+    def simulate(self):
+        for _ in range(self.sim_substeps):
+            self.state_0.clear_forces()
+            self.state_1.clear_forces()
+            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
+            self.state_0, self.state_1 = self.state_1, self.state_0
 
     def _push_ik_targets(self):
         for index, transform in enumerate(self.target_tcp_transforms):
@@ -373,7 +400,10 @@ class Example:
 
     def _update_commands(self):
         self._push_ik_targets()
-        self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iterations)
+        if self.graph_ik is not None:
+            wp.capture_launch(self.graph_ik)
+        else:
+            self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iterations)
         ik_result = self.joint_q_ik.numpy()[0]
         arm_solution = ik_result[self.arm_coord_indices]
         if np.all(np.isfinite(arm_solution)):
@@ -393,15 +423,15 @@ class Example:
         self.max_arm_target_increments = np.maximum(self.max_arm_target_increments, increments)
         self.previous_arm_targets = arm_targets
 
-        target_q = self.control.joint_target_q.numpy()
+        target_q = self.control_target_q
         target_q[self.arm_coord_indices] = arm_targets
-        lower = self.model.joint_limit_lower.numpy()
-        upper = self.model.joint_limit_upper.numpy()
         for side in range(2):
-            dof_indices = self.finger_dof_indices[2 * side : 2 * side + 2]
-            coord_indices = self.finger_coord_indices[2 * side : 2 * side + 2]
+            finger_slice = slice(2 * side, 2 * side + 2)
+            coord_indices = self.finger_coord_indices[finger_slice]
             target_q[coord_indices] = gripper_joint_targets(
-                self.gripper_openings[side], lower[dof_indices], upper[dof_indices]
+                self.gripper_openings[side],
+                self.finger_lower_limits[finger_slice],
+                self.finger_upper_limits[finger_slice],
             )
         self.control.joint_target_q.assign(target_q)
 
@@ -420,11 +450,10 @@ class Example:
 
     def step(self):
         self._update_commands()
-        for _ in range(self.sim_substeps):
-            self.state_0.clear_forces()
-            self.state_1.clear_forces()
-            self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
-            self.state_0, self.state_1 = self.state_1, self.state_0
+        if self.graph_sim is not None:
+            wp.capture_launch(self.graph_sim)
+        else:
+            self.simulate()
         self.sim_time += self.frame_dt
         self._update_tcp_errors()
 

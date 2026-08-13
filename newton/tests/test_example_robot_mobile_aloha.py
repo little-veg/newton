@@ -206,9 +206,15 @@ class TestMobileAlohaExample(unittest.TestCase):
         args = types.SimpleNamespace(asset_root=str(asset_root), test=True)
         with wp.ScopedDevice(devices[0]):
             example = example_type(ViewerNull(num_frames=180), args)
+            self.assertEqual(example.ik_iterations, 24)
+            self.assertEqual(example.sim_substeps, 10)
+            self.assertIsNotNone(example.graph_ik)
+            self.assertIsNotNone(example.graph_sim)
+            np.testing.assert_allclose(example.control_target_q, example.control.joint_target_q.numpy())
             for _ in range(180):
                 example.step()
                 example.test_post_step()
+            np.testing.assert_allclose(example.control_target_q, example.control.joint_target_q.numpy())
             example.test_final()
 
 
