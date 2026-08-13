@@ -458,6 +458,7 @@ class Example:
         self._update_tcp_errors()
 
     def test_post_step(self):
+        """Check dynamic state remains finite after each simulation frame."""
         arrays = (
             self.state_0.joint_q.numpy(),
             self.state_0.joint_qd.numpy(),
@@ -468,6 +469,7 @@ class Example:
             raise AssertionError("Mobile ALOHA dynamic state contains non-finite values")
 
     def test_final(self):
+        """Check final Mobile ALOHA dynamics and tracking constraints."""
         joint_types = self.model.joint_type.numpy()
         if len(self.arm_dof_indices) != 12 or not np.all(
             joint_types[self.arm_joint_indices] == int(newton.JointType.REVOLUTE)

@@ -211,6 +211,19 @@ class TestMobileAlohaExample(unittest.TestCase):
             self.assertIsNotNone(example.graph_ik)
             self.assertIsNotNone(example.graph_sim)
             np.testing.assert_allclose(example.control_target_q, example.control.joint_target_q.numpy())
+            joint_q_before_commands = example.state_0.joint_q.numpy().copy()
+            joint_qd_before_commands = example.state_0.joint_qd.numpy().copy()
+            control_targets_before_commands = example.control.joint_target_q.numpy().copy()
+            example._update_commands()
+            np.testing.assert_array_equal(example.state_0.joint_q.numpy(), joint_q_before_commands)
+            np.testing.assert_array_equal(example.state_0.joint_qd.numpy(), joint_qd_before_commands)
+            control_targets_after_commands = example.control.joint_target_q.numpy()
+            self.assertFalse(
+                np.array_equal(
+                    control_targets_after_commands[example.arm_coord_indices],
+                    control_targets_before_commands[example.arm_coord_indices],
+                )
+            )
             for _ in range(180):
                 example.step()
                 example.test_post_step()
