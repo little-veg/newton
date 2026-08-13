@@ -554,3 +554,9 @@
 - Context: Defining acceptance for an affine-body bunny falling onto a four-corner-pinned cloth.
 - Mistake: Presented affine non-inversion as a central scene outcome even though the high-rigidity ARAP term already keeps the affine matrix near the rotation space.
 - Rule: In ABD rigid-cloth experiments, keep finite-state and `det(A) > 0` checks as secondary numerical guards. Judge the experiment primarily by coupled contact behavior: cloth support, penetration, contact capacity, and stable load transfer. Distinguish allowed whole-body rotation from forbidden affine shear, stretch, or reflection.
+
+## 2026-08-13 — Scope near-term control work to mechanical arms
+
+- Context: Beginning the next Newton control phase after the ABD rigid-cloth experiments.
+- Mistake: Described the requested investigation as general robot control when the intended scope is specifically articulated mechanical-arm control.
+- Rule: Focus the next control design on fixed-base articulated mechanical arms: task targets, IK, joint-space actuation, dynamics, and contact coupling. Defer mobile bases, sensing, planning, and broader robot-system architecture until the user explicitly requests them.
