@@ -472,3 +472,260 @@ git commit -m "Finalize Mobile ALOHA import"
 
 Skip the final-fix commit when the working tree contains no uncommitted feature
 files; amend no earlier user commit. Do not push until the user explicitly asks.
+
+---
+
+### Task 6: Capture IK and MuJoCo execution on CUDA
+
+**Files:**
+- Modify: `newton/tests/test_example_robot_mobile_aloha.py`
+- Modify: `newton/examples/robot/example_robot_mobile_aloha.py`
+- Modify: `CHANGELOG.md`
+
+**Interfaces:**
+- Consumes: the existing persistent `joint_q_ik`, IK objectives, MuJoCo solver,
+  `state_0`, `state_1`, and `control` arrays.
+- Produces: `Example.graph_ik`, `Example.graph_sim`, `Example.capture()`,
+  `Example.simulate()`, and a persistent `Example.control_target_q` host array.
+
+- [ ] **Step 1: Require captured execution in the CUDA integration test**
+
+Immediately after constructing `Example` in `test_tracks_both_tcp_targets()`,
+add:
+
+```python
+self.assertEqual(example.ik_iterations, 24)
+self.assertEqual(example.sim_substeps, 10)
+self.assertIsNotNone(example.graph_ik)
+self.assertIsNotNone(example.graph_sim)
+np.testing.assert_allclose(example.control_target_q, example.control.joint_target_q.numpy())
+```
+
+After the existing 180-frame loop, repeat the `control_target_q` equality
+assertion before `example.test_final()`. This verifies that the graph path keeps
+the CPU command cache and GPU control buffer consistent without changing the
+validated numerical schedule.
+
+- [ ] **Step 2: Run the integration test and verify RED**
+
+```bash
+uv run --extra dev -m newton.tests \
+  -p test_example_robot_mobile_aloha.py \
+  -k test_tracks_both_tcp_targets
+```
+
+Expected: FAIL because the current example has no `graph_ik`, `graph_sim`, or
+`control_target_q` attributes.
+
+- [ ] **Step 3: Cache immutable command data during initialization**
+
+In `Example.__init__`, replace repeated per-frame limit downloads with one
+initial download and preserve an authoritative host target array:
+
+```python
+joint_limit_lower = self.model.joint_limit_lower.numpy()
+joint_limit_upper = self.model.joint_limit_upper.numpy()
+self.arm_lower_limits = joint_limit_lower[self.arm_dof_indices]
+self.arm_upper_limits = joint_limit_upper[self.arm_dof_indices]
+self.arm_velocity_limits = self.model.joint_velocity_limit.numpy()[self.arm_dof_indices]
+self.finger_lower_limits = joint_limit_lower[self.finger_dof_indices]
+self.finger_upper_limits = joint_limit_upper[self.finger_dof_indices]
+self.control_target_q = self.control.joint_target_q.numpy()
+```
+
+In `_update_commands()`, mutate `self.control_target_q` directly, use the
+cached finger-limit arrays, and upload the completed buffer once:
+
+```python
+target_q = self.control_target_q
+for side in range(2):
+    finger_slice = slice(2 * side, 2 * side + 2)
+    coord_indices = self.finger_coord_indices[finger_slice]
+    target_q[coord_indices] = gripper_joint_targets(
+        self.gripper_openings[side],
+        self.finger_lower_limits[finger_slice],
+        self.finger_upper_limits[finger_slice],
+    )
+self.control.joint_target_q.assign(target_q)
+```
+
+Keep the existing IK-result and body-transform `.numpy()` calls; they provide
+the CPU values required for command validation and GUI TCP errors. Do not add a
+Warp synchronization call before either copy.
+
+- [ ] **Step 4: Add direct and captured execution paths**
+
+Add these methods to `Example`:
+
+```python
+def capture(self):
+    self.graph_ik = None
+    self.graph_sim = None
+    if not self.model.device.is_cuda:
+        return
+
+    with wp.ScopedCapture(device=self.model.device) as capture:
+        self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iterations)
+    self.graph_ik = capture.graph
+
+    with wp.ScopedCapture(device=self.model.device) as capture:
+        self.simulate()
+    self.graph_sim = capture.graph
+
+def simulate(self):
+    for _ in range(self.sim_substeps):
+        self.state_0.clear_forces()
+        self.state_1.clear_forces()
+        self.solver.step(self.state_0, self.state_1, self.control, None, self.sim_dt)
+        self.state_0, self.state_1 = self.state_1, self.state_0
+```
+
+Call `self.capture()` once at the end of `__init__`, after the persistent IK,
+state, control, and cached host buffers exist. Keep `sim_substeps == 10`, so
+capture and every launch preserve the Python state-reference ordering.
+
+Replace the direct IK call in `_update_commands()` with:
+
+```python
+if self.graph_ik is not None:
+    wp.capture_launch(self.graph_ik)
+else:
+    self.ik_solver.step(self.joint_q_ik, self.joint_q_ik, iterations=self.ik_iterations)
+```
+
+Replace the inline simulation loop in `step()` with:
+
+```python
+if self.graph_sim is not None:
+    wp.capture_launch(self.graph_sim)
+else:
+    self.simulate()
+```
+
+Do not catch CUDA capture failures. The direct path is only the non-CUDA
+fallback; a CUDA capture error must remain visible.
+
+- [ ] **Step 5: Run the CUDA integration test and verify GREEN**
+
+Run the Step 2 command. Expected: PASS after 180 frames through both graphs,
+including the existing TCP, joint-limit, root-drift, finger, and rate-limit
+assertions.
+
+- [ ] **Step 6: Add the user-facing performance changelog entry**
+
+Insert at a random position under `[Unreleased] / Changed`:
+
+```markdown
+- Accelerate the Mobile ALOHA example with captured CUDA graphs while preserving its 24-iteration IK and ten-substep dynamics schedule.
+```
+
+- [ ] **Step 7: Run focused hooks and commit**
+
+```bash
+uvx pre-commit run --files \
+  newton/examples/robot/example_robot_mobile_aloha.py \
+  newton/tests/test_example_robot_mobile_aloha.py \
+  CHANGELOG.md
+git diff --check
+git add newton/examples/robot/example_robot_mobile_aloha.py \
+  newton/tests/test_example_robot_mobile_aloha.py CHANGELOG.md
+git commit -m "Accelerate Mobile ALOHA with CUDA graphs"
+```
+
+---
+
+### Task 7: Measure performance and visually validate interaction
+
+**Files:**
+- Verify: `newton/examples/robot/example_robot_mobile_aloha.py`
+- Verify: `newton/tests/test_example_robot_mobile_aloha.py`
+- Verify: `newton/tests/test_examples.py`
+
+**Interfaces:**
+- Consumes: `Example.graph_ik`, `Example.graph_sim`, and `Example.simulate()`
+  from Task 6.
+- Produces: measured captured-versus-direct timings and a visually accepted GL
+  run without adding a timing-dependent CI assertion.
+
+- [ ] **Step 1: Benchmark graph and direct core execution after warmup**
+
+Run this local CUDA benchmark:
+
+```bash
+uv run --extra dev python - <<'PY'
+from types import SimpleNamespace
+import time
+import warp as wp
+from newton.examples.robot.example_robot_mobile_aloha import Example
+from newton.viewer import ViewerNull
+
+
+def measure(fn, count=100):
+    wp.synchronize()
+    start = time.perf_counter()
+    for _ in range(count):
+        fn()
+    wp.synchronize()
+    return 1000.0 * (time.perf_counter() - start) / count
+
+
+with wp.ScopedDevice("cuda:0"):
+    example = Example(ViewerNull(num_frames=200), SimpleNamespace(asset_root=None, test=False))
+    raw_ik = measure(
+        lambda: example.ik_solver.step(
+            example.joint_q_ik,
+            example.joint_q_ik,
+            iterations=example.ik_iterations,
+        ),
+        30,
+    )
+    graph_ik = measure(lambda: wp.capture_launch(example.graph_ik))
+    raw_sim = measure(example.simulate, 30)
+    graph_sim = measure(lambda: wp.capture_launch(example.graph_sim))
+    full_frame = measure(example.step, 30)
+
+    print(f"IK raw={raw_ik:.3f} ms graph={graph_ik:.3f} ms speedup={raw_ik / graph_ik:.2f}x")
+    print(f"SIM raw={raw_sim:.3f} ms graph={graph_sim:.3f} ms speedup={raw_sim / graph_sim:.2f}x")
+    print(f"FULL frame={full_frame:.3f} ms fps={1000.0 / full_frame:.1f}")
+PY
+```
+
+On the reference RTX 5090, require at least `3x` speedup for each captured core
+sequence. The pre-change measurements were `9.857 ms` for IK, `23.840 ms` for
+simulation, and about `29 FPS` for a complete headless frame. Do not encode a
+wall-clock threshold in `unittest`.
+
+- [ ] **Step 2: Run focused regression tests**
+
+```bash
+uv run --extra dev -m newton.tests -p test_example_robot_mobile_aloha.py
+uv run --extra dev -m newton.tests -p test_examples.py -k example_robot_mobile_aloha
+```
+
+Expected: all helper tests, the 180-frame CUDA integration rollout, and the
+registered subprocess example pass.
+
+- [ ] **Step 3: Launch and inspect the optimized interactive viewer**
+
+```bash
+uv run --extra examples -m newton.examples robot_mobile_aloha --device cuda:0
+```
+
+Verify the steady-state FPS improvement, both draggable TCP gizmos, independent
+gripper sliders, decreasing reachable-target errors, fixed base mechanisms,
+and no startup jump or visual scale regression. Close the window after visual
+acceptance.
+
+- [ ] **Step 4: Verify repository state**
+
+```bash
+uvx pre-commit run --files $(git diff --name-only origin/dev...HEAD)
+git diff --check
+git status --short --branch
+git log -12 --oneline --decorate
+```
+
+Confirm the pre-existing modified
+`docs/images/examples/example_cloth_limx_three_tshirts_box.jpg` and untracked
+`solver_convergence.png` remain unstaged and unchanged. Do not push until the
+user explicitly requests it.
