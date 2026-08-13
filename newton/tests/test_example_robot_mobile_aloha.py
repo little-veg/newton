@@ -3,12 +3,16 @@
 
 import importlib
 import tempfile
+import types
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import numpy as np
+import warp as wp
 
+from newton.solvers import SolverMuJoCo
+from newton.viewer import ViewerNull
 
 LOCKED_JOINT_NAMES = (
     "fr_steering_joint",
@@ -54,7 +58,9 @@ class TestMobileAlohaHelpers(unittest.TestCase):
         ET.SubElement(robot, "joint", name="left/joint1", type="revolute")
         ET.SubElement(robot, "joint", name="right/joint1", type="revolute")
         left_link = ET.SubElement(robot, "link", name="left/link1")
-        ET.SubElement(ET.SubElement(left_link, "visual"), "mesh", filename="package://piper_description/meshes/link.stl")
+        ET.SubElement(
+            ET.SubElement(left_link, "visual"), "mesh", filename="package://piper_description/meshes/link.stl"
+        )
         base_link = ET.SubElement(robot, "link", name="base_link")
         ET.SubElement(
             ET.SubElement(base_link, "visual"),
@@ -160,9 +166,7 @@ class TestMobileAlohaHelpers(unittest.TestCase):
         """Reject mismatched target arrays and invalid rate-limit parameters."""
         valid = np.array([0.0, 0.0])
         with self.assertRaisesRegex(ValueError, "shape"):
-            self.module.clamp_and_rate_limit_targets(
-                np.array([0.0]), valid, valid - 1.0, valid + 1.0, valid + 1.0, 0.1
-            )
+            self.module.clamp_and_rate_limit_targets(np.array([0.0]), valid, valid - 1.0, valid + 1.0, valid + 1.0, 0.1)
         with self.assertRaisesRegex(ValueError, "frame_dt"):
             self.module.clamp_and_rate_limit_targets(valid, valid, valid - 1.0, valid + 1.0, valid + 1.0, 0.0)
         with self.assertRaisesRegex(ValueError, "velocity"):
@@ -172,6 +176,32 @@ class TestMobileAlohaHelpers(unittest.TestCase):
         """Map total opening to opposite finger coordinates within limits."""
         result = self.module.gripper_joint_targets(0.1, np.array([0.0, -0.04]), np.array([0.04, 0.0]))
         np.testing.assert_allclose(result, [0.04, -0.04])
+
+
+class TestMobileAlohaExample(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.module = importlib.import_module("newton.examples.robot.example_robot_mobile_aloha")
+
+    def test_tracks_both_tcp_targets(self):
+        """Track reachable dual-TCP targets through dynamic joint drives."""
+        devices = wp.get_cuda_devices()
+        if not devices:
+            self.skipTest("CUDA is unavailable")
+        try:
+            SolverMuJoCo.import_mujoco()
+        except Exception as error:
+            self.skipTest(f"MuJoCo Warp is unavailable: {error}")
+
+        example_type = self.module.Example
+        asset_root = self.module.resolve_mobile_aloha_asset_root(None)
+        args = types.SimpleNamespace(asset_root=str(asset_root), test=True)
+        with wp.ScopedDevice(devices[0]):
+            example = example_type(ViewerNull(num_frames=180), args)
+            for _ in range(180):
+                example.step()
+                example.test_post_step()
+            example.test_final()
 
 
 if __name__ == "__main__":
