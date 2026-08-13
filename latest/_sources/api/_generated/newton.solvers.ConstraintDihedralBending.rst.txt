@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintDihedralBending
+========================================
+
+.. autoclass:: newton.solvers.ConstraintDihedralBending
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

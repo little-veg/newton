@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintGroupAffine
+====================================
+
+.. autoclass:: newton.solvers.ConstraintGroupAffine
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

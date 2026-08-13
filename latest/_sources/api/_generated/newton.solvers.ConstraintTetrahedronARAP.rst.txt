@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintTetrahedronARAP
+========================================
+
+.. autoclass:: newton.solvers.ConstraintTetrahedronARAP
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

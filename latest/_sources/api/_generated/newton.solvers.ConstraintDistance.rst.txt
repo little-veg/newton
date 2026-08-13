@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintDistance
+=================================
+
+.. autoclass:: newton.solvers.ConstraintDistance
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

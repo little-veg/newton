@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintAffineBodyContact
+==========================================
+
+.. autoclass:: newton.solvers.ConstraintAffineBodyContact
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintSelfCollision
+======================================
+
+.. autoclass:: newton.solvers.ConstraintSelfCollision
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

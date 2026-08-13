@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintTriangleElastic
+========================================
+
+.. autoclass:: newton.solvers.ConstraintTriangleElastic
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

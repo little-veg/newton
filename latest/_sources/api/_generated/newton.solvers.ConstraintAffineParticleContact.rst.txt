@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintAffineParticleContact
+==============================================
+
+.. autoclass:: newton.solvers.ConstraintAffineParticleContact
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

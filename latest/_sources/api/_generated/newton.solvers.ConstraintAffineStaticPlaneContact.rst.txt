@@ -1,0 +1,8 @@
+﻿newton.solvers.ConstraintAffineStaticPlaneContact
+=================================================
+
+.. autoclass:: newton.solvers.ConstraintAffineStaticPlaneContact
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise

@@ -1,0 +1,8 @@
+﻿newton.solvers.SolverLIMX
+=========================
+
+.. autoclass:: newton.solvers.SolverLIMX
+   :members:
+   :undoc-members:
+   :show-inheritance:
+   :member-order: groupwise
