@@ -18,6 +18,7 @@ try:
 except ImportError:
     git = None
 
+import newton.utils
 from newton._src.utils.download_assets import (
     _TEMP_DIR_RE,
     _cleanup_old_versions,
@@ -113,8 +114,6 @@ class TestDownloadAssets(unittest.TestCase):
 
     def test_public_root_download_by_commit(self):
         """Download and reuse a complete repository root through the public API."""
-        import newton.utils
-
         nested = Path(self.work_dir, "piper_description", "meshes")
         nested.mkdir(parents=True)
         (nested / "link.stl").write_text("mesh\n", encoding="utf-8")
