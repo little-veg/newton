@@ -1,19 +1,47 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
 
-"""LIMX constraint-based particle solver."""
+"""LIMX constraint-based particle and affine solvers."""
 
-from .constraints import ConstraintAnchor, ConstraintDistance, ConstraintTriangleElastic
+from .affine_body import AffineBodyModel
+from .constraints import (
+    ConstraintAffineBodyContact,
+    ConstraintAffineParticleContact,
+    ConstraintAffineStaticPlaneContact,
+    ConstraintAnchor,
+    ConstraintDihedralBending,
+    ConstraintDistance,
+    ConstraintGroupAffine,
+    ConstraintGroupDynamic,
+    ConstraintSelfCollision,
+    ConstraintStaticPlaneContact,
+    ConstraintTetrahedronARAP,
+    ConstraintTriangleElastic,
+)
 from .linear_solver import PcgSolver
 from .operator import CompositeLinearOperator, EmptyDynamicConstraintOperator
+from .solver_affine import SolverLIMXAffine
+from .solver_coupled import SolverLIMXCoupled
 from .solver_newton import SolverLIMX
 
 __all__ = [
+    "AffineBodyModel",
     "CompositeLinearOperator",
+    "ConstraintAffineBodyContact",
+    "ConstraintAffineParticleContact",
+    "ConstraintAffineStaticPlaneContact",
     "ConstraintAnchor",
+    "ConstraintDihedralBending",
     "ConstraintDistance",
+    "ConstraintGroupAffine",
+    "ConstraintGroupDynamic",
+    "ConstraintSelfCollision",
+    "ConstraintStaticPlaneContact",
+    "ConstraintTetrahedronARAP",
     "ConstraintTriangleElastic",
     "EmptyDynamicConstraintOperator",
     "PcgSolver",
     "SolverLIMX",
+    "SolverLIMXAffine",
+    "SolverLIMXCoupled",
 ]

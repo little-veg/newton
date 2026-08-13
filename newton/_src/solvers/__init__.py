@@ -9,7 +9,24 @@ if TYPE_CHECKING:
     from .featherstone import SolverFeatherstone
     from .implicit_mpm import SolverImplicitMPM
     from .kamino import SolverKamino
-    from .limx import ConstraintAnchor, ConstraintDistance, ConstraintTriangleElastic, SolverLIMX
+    from .limx import (
+        AffineBodyModel,
+        ConstraintAffineBodyContact,
+        ConstraintAffineParticleContact,
+        ConstraintAffineStaticPlaneContact,
+        ConstraintAnchor,
+        ConstraintDihedralBending,
+        ConstraintDistance,
+        ConstraintGroupAffine,
+        ConstraintGroupDynamic,
+        ConstraintSelfCollision,
+        ConstraintStaticPlaneContact,
+        ConstraintTetrahedronARAP,
+        ConstraintTriangleElastic,
+        SolverLIMX,
+        SolverLIMXAffine,
+        SolverLIMXCoupled,
+    )
     from .mujoco import SolverMuJoCo
     from .semi_implicit import SolverSemiImplicit
     from .solver import SolverBase
@@ -18,14 +35,26 @@ if TYPE_CHECKING:
     from .xpbd import SolverXPBD
 
 __all__ = [
+    "AffineBodyModel",
+    "ConstraintAffineBodyContact",
+    "ConstraintAffineParticleContact",
+    "ConstraintAffineStaticPlaneContact",
     "ConstraintAnchor",
+    "ConstraintDihedralBending",
     "ConstraintDistance",
+    "ConstraintGroupAffine",
+    "ConstraintGroupDynamic",
+    "ConstraintSelfCollision",
+    "ConstraintStaticPlaneContact",
+    "ConstraintTetrahedronARAP",
     "ConstraintTriangleElastic",
     "SolverBase",
     "SolverFeatherstone",
     "SolverImplicitMPM",
     "SolverKamino",
     "SolverLIMX",
+    "SolverLIMXAffine",
+    "SolverLIMXCoupled",
     "SolverMuJoCo",
     "SolverSemiImplicit",
     "SolverStyle3D",
@@ -39,14 +68,26 @@ __all__ = [
 # resolved on first attribute access (PEP 562) so that importing Newton does
 # not pay the import cost of every solver backend.
 _LAZY_IMPORTS: dict[str, tuple[str, str | None]] = {
+    "AffineBodyModel": (".limx", "AffineBodyModel"),
+    "ConstraintAffineBodyContact": (".limx", "ConstraintAffineBodyContact"),
+    "ConstraintAffineParticleContact": (".limx", "ConstraintAffineParticleContact"),
+    "ConstraintAffineStaticPlaneContact": (".limx", "ConstraintAffineStaticPlaneContact"),
     "ConstraintAnchor": (".limx", "ConstraintAnchor"),
+    "ConstraintDihedralBending": (".limx", "ConstraintDihedralBending"),
     "ConstraintDistance": (".limx", "ConstraintDistance"),
+    "ConstraintGroupAffine": (".limx", "ConstraintGroupAffine"),
+    "ConstraintGroupDynamic": (".limx", "ConstraintGroupDynamic"),
+    "ConstraintSelfCollision": (".limx", "ConstraintSelfCollision"),
+    "ConstraintStaticPlaneContact": (".limx", "ConstraintStaticPlaneContact"),
+    "ConstraintTetrahedronARAP": (".limx", "ConstraintTetrahedronARAP"),
     "ConstraintTriangleElastic": (".limx", "ConstraintTriangleElastic"),
     "SolverBase": (".solver", "SolverBase"),
     "SolverFeatherstone": (".featherstone", "SolverFeatherstone"),
     "SolverImplicitMPM": (".implicit_mpm", "SolverImplicitMPM"),
     "SolverKamino": (".kamino", "SolverKamino"),
     "SolverLIMX": (".limx", "SolverLIMX"),
+    "SolverLIMXAffine": (".limx", "SolverLIMXAffine"),
+    "SolverLIMXCoupled": (".limx", "SolverLIMXCoupled"),
     "SolverMuJoCo": (".mujoco", "SolverMuJoCo"),
     "SolverSemiImplicit": (".semi_implicit", "SolverSemiImplicit"),
     "SolverStyle3D": (".style3d.solver_style3d", "SolverStyle3D"),

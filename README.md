@@ -142,7 +142,11 @@ If you run the examples from a source checkout with uv, use
         <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_basic_dzhanibekov.jpg" alt="Dzhanibekov">
       </a>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/basic/example_basic_limx_affine_body.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_basic_limx_affine_body.jpg" alt="LIMX Affine Body">
+      </a>
+    </td>
   </tr>
   <tr>
     <td align="center" width="33%">
@@ -151,7 +155,31 @@ If you run the examples from a source checkout with uv, use
     <td align="center" width="33%">
       <code>python -m newton.examples basic_dzhanibekov</code>
     </td>
-    <td></td>
+    <td align="center" width="33%">
+      <code>uv run -m newton.examples basic_limx_affine_body</code>
+    </td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/basic/example_basic_limx_affine_bunny_ground.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_basic_limx_affine_bunny_ground.jpg" alt="LIMX Affine Bunny Ground Contact">
+      </a>
+    </td>
+    <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/basic/example_basic_limx_affine_bunnies_ground.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_basic_limx_affine_bunnies_ground.jpg" alt="LIMX Affine Bunny Pile Contact">
+      </a>
+    </td>
+    <td width="33%"></td>
+  </tr>
+  <tr>
+    <td align="center" width="33%">
+      <code>uv run -m newton.examples basic_limx_affine_bunny_ground</code>
+    </td>
+    <td align="center" width="33%">
+      <code>uv run -m newton.examples basic_limx_affine_bunnies_ground</code>
+    </td>
+    <td width="33%"></td>
   </tr>
   <tr>
     <td colspan="3"><h3>Robot Examples</h3></td>
@@ -370,6 +398,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cloth/example_cloth_limx_three_tshirts_box.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_limx_three_tshirts_box.jpg" alt="LIMX Three T-Shirts in a Box">
+      </a>
     </td>
   </tr>
   <tr>
@@ -380,6 +411,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples cloth_poker_cards</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples cloth_limx_three_tshirts_box</code>
     </td>
   </tr>
   <tr>
@@ -389,6 +421,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/cloth/example_cloth_limx_ee_chatter.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_cloth_limx_ee_chatter.jpg" alt="LIMX Geometry-Aware Self-Collision">
+      </a>
     </td>
     <td align="center" width="33%">
     </td>
@@ -398,6 +433,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples cloth_limx</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples cloth_limx_ee_chatter</code>
     </td>
     <td align="center" width="33%">
     </td>
@@ -828,6 +864,9 @@ If you run the examples from a source checkout with uv, use
       </a>
     </td>
     <td align="center" width="33%">
+      <a href="https://github.com/newton-physics/newton/blob/main/newton/examples/softbody/example_softbody_limx_arap_beam.py">
+        <img width="320" src="https://raw.githubusercontent.com/newton-physics/newton/main/docs/images/examples/example_softbody_limx_arap_beam.jpg" alt="LIMX ARAP Beam">
+      </a>
     </td>
   </tr>
   <tr>
@@ -838,6 +877,7 @@ If you run the examples from a source checkout with uv, use
       <code>python -m newton.examples softbody_franka</code>
     </td>
     <td align="center" width="33%">
+      <code>python -m newton.examples softbody_limx_arap_beam</code>
     </td>
   </tr>
   <tr>

@@ -140,6 +140,9 @@ class SolverLIMX(SolverBase):
         self.static_matrix = matrix_builder.finalize(self.device)
         for constraint in self.constraints:
             constraint.bind_hessian(self.static_matrix)
+        bind_dynamic_static_system = getattr(self.dynamic_operator, "bind_static_system", None)
+        if bind_dynamic_static_system is not None:
+            bind_dynamic_static_system(self.static_matrix.diagonal, model.particle_mass)
 
         self.operator = CompositeLinearOperator(
             masses=model.particle_mass,
@@ -196,8 +199,15 @@ class SolverLIMX(SolverBase):
             device=self.device,
         )
 
+        begin_dynamic_step = getattr(self.dynamic_operator, "begin_step", None)
+        if begin_dynamic_step is not None:
+            begin_dynamic_step(state_in.particle_q, state_in.particle_qd, dt)
+
         inv_dt_squared = 1.0 / (dt * dt)
         for nonlinear_iteration in range(self.nonlinear_iterations):
+            prepare_dynamic_constraints = getattr(self.dynamic_operator, "prepare", None)
+            if prepare_dynamic_constraints is not None:
+                prepare_dynamic_constraints(self.iterate_positions)
             self.static_matrix.clear_values()
             wp.launch(
                 _initialize_rhs,
@@ -217,9 +227,8 @@ class SolverLIMX(SolverBase):
                     self.rhs,
                     self.static_matrix.values,
                 )
-            self.dynamic_operator.accumulate_force(self.iterate_positions, self.rhs)
-
             self.static_matrix.update_diagonal()
+            self.dynamic_operator.accumulate_force(self.iterate_positions, self.rhs)
             self.operator.prepare(self.iterate_positions, dt)
             self.linear_solver.solve(
                 self.operator,

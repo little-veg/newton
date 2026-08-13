@@ -5,7 +5,20 @@
 ### Added
 
 - Add a source-verified Isaac Sim 6.0.1 development launcher and CUDA rigid-body demo.
+- Add fully coupled affine-particle VF/EE contact and an ABD bunny-on-pinned-cloth example.
 - Add `SolverLIMX` with current-position projected-Newton assembly, fixed-topology 3×3 block-CSR elasticity, matrix-free dynamic constraint hooks, block-Jacobi PCG, and batched anchor, distance, and anisotropic triangle-membrane constraints.
+- Add a public LIMX tetrahedral ARAP constraint with exact analytical derivatives, full-matrix positive-semidefinite Hessian projection, and a fixed cantilever-beam example.
+- Add dihedral-angle bending to LIMX cloth with exact wrapped-angle forces and Gauss-Newton positive-semidefinite block-CSR Hessians.
+- Add frictionless LIMX cloth self-collision with GPU VF/EE detection, EF untangling, and full matrix-free positive-semidefinite contact Hessians.
+- Add adaptive LIMX self-collision stiffness derived from the current elastic diagonal and inertia, with independent VF, EE, and EF factors.
+- Add automatic LIMX self-collision thickness from the rest-geometry two-ring clearance, capped at 5 mm.
+- Add regularized Coulomb friction to LIMX vertex-face and edge-edge cloth self-collision.
+- Add penalty-based static-plane contact for LIMX affine bodies and a frictional bunny-drop example.
+- Add a topology-local-only scope for geometry-aware LIMX self-collision radii so one-ring VF/EE can use rest-geometry caps while nonlocal pairs keep the nominal thickness.
+- Add optional surface-particle subsets to LIMX static-plane contact and an option to disable edge-face recovery in self-collision.
+- Add opt-in outward-normal signed VF/EE contact for closed LIMX volume surfaces, excluding only strictly incident pairs that share primitive indices.
+- Add a CUDA LIMX example that contrasts a settled control with geometry-aware VF/EE self-collision at a 6 mm nominal thickness.
+- Add a LIMX T-shirt table-contact example with self-collision, contact damping, and friction.
 - Break the viewer's shape count down into visual and collision shapes. The two are listed under `Shapes` in the stats overlay and need not sum to the total, since a shape can be both.
 - Add selection of the shapes included in model shape BVHs through `Model.bvh_build_shapes(shape_flags=...)` and `ModelBuilder.default_bvh_cfg.shape_flags`, e.g. `ShapeFlags.VISIBLE | ShapeFlags.COLLIDE_SHAPES` to also include collision shapes.
 - Add a `damping` parameter to `ModelBuilder.add_joint_ball()` that applies passive angular damping to all three ball-joint DOFs; when omitted, `ModelBuilder.default_joint_cfg.damping` applies.
@@ -23,10 +36,14 @@
 - Add `newton[onnx]` for ONNX policy inference through Warp-NN; `ControllerNeuralMLP`, `ControllerNeuralLSTM`, and RL policy examples can run exported `.onnx` policies without requiring PyTorch for ONNX execution.
 - Add three VBD contact examples — `vbd_rigid_rigid_contact`, `vbd_soft_rigid_contact`, and `vbd_soft_rigid_mix_contact` — demonstrating rigid-rigid, soft (particle-rigid), and mixed cloth-bag contacts
 - Add masked rigid-body reset support to `SolverVBD`; particle resets are not yet supported. (#3256)
+- Add mutually colliding affine-body VF/EE contact and an eight-bunny pile example.
+- Add `AffineBodyModel` and `SolverLIMXAffine` for collision-free affine-body dynamics, with a falling-shear example.
 - Add viewer layer system to overlay multiple solvers/models in supported rendering viewers; call `ViewerBase.activate(layer_id)` to route subsequent `set_model` / `log_state` / `log_*` calls into a named layer, `ViewerBase.set_layer_visible()` to toggle layers independently, and `ViewerBase.set_layer_transform()` to position layers side-by-side. See `example_basic_multi_solver_overlay.py`
 - Add `Heightfield.create_from_mesh()` and `newton.utils.rasterize_mesh_to_heightfield()` to build a heightfield collider by ray-casting a `wp.Mesh`, replacing a large static terrain mesh with an equivalent heightfield.
 - Add `ViewerBase.camera_speed` to configure keyboard translation speed for interactive viewers. (#3439)
 - Add a "Show Ground" visualization toggle (`ViewerBase.show_ground`, default on) to hide or show ground-plane shapes in the viewer.
+- Add a CUDA LIMX stress-test example that throws three mutually colliding T-shirts into an open box.
+- Add opt-in rest-geometry-aware per-particle radii to `ConstraintSelfCollision`, capped by the nominal collision thickness and interpolated for VF/EE contacts.
 - Add opt-in DVI forward dynamics to `SolverKamino` through `SolverKamino.Config(dynamics_solver="dvi")`, with sparse and dense execution, DVI-specific diagnostics, and warm-starting. PADMM remains the default.
 - Add opt-in DVI forward dynamics to `SolverKamino` through `SolverKamino.Config(dynamics_solver="dvi")`, with sparse and dense execution, DVI-specific convergence diagnostics, warm-starting, bounded contact-recovery controls, and RCM-reordered bilateral factorization with reusable ordering and panel-parallel numeric factorization for large systems. PADMM remains the default.
 - Add SDF contact support for convex-hull shapes with mesh-attached SDFs and opt-in SDF contact generation for box shapes.
@@ -51,6 +68,10 @@
 - Compile tiled camera render kernels with CUDA fast math by default for faster rendering; set `SensorTiledCamera.render_config.enable_fast_math = False` for bit-exact, IEEE-precise output.
 - Make `CollisionPipeline` the sole owner of rigid-contact geometry for `SolverVBD`: `"latest"` supplies fresh geometry and `"sticky"` supplies replayed geometry. `SolverVBD(rigid_contact_history=True)` uses either mode's match indices only to warm-start its numeric lambda/penalty state.
 - Optimize raycast/raytrace queries by restructuring ray-shape intersection into local-space primitives and compile specialized depth/shadow variants that skip unused surface-normal work (mesh shadows also use any-hit queries).
+- Default LIMX edge-face untangling to three times the VF/EE contact stiffness; pass an explicit `untangle_stiffness` to retain a different recovery ratio.
+- Align the LIMX cloth-twist example with the ChysX reference mesh, drive, mass, material, and collision parameters.
+- Speed up LIMX construction and viewer reset by initializing dihedral rest angles on GPU and batching static block-CSR topology.
+- Allow geometry-aware LIMX self-collision radii on tetrahedral surface meshes by assigning zero radius to particles absent from the collision surface.
 - Change experimental `SolverVBD` cable constraint slots from `[STRETCH=0, BEND=1]` to `[STRETCH=0, SHEAR=1, BEND=2, TWIST=3]`, allowing each stiffness and constraint mode to be configured independently. Existing cable calls using raw `slot=1` or `JointSlot.ANGULAR` now select shear; use `JointSlot.BEND` (now slot 2) to select bending.
 - Load visual-only USD geometry outside rigid-body hierarchies as static shapes by default; pass `load_static_visual_shapes=False` to retain the previous body-associated-visuals-only behavior.
 - Improve `SolverKamino` GPU simulation and kernel compilation performance.
@@ -92,6 +113,10 @@
 
 ### Fixed
 
+- Restrict LIMX vertex-face candidates to vertices referenced by the surface triangle mesh.
+- Delegate LIMX point-edge and point-point proximity response to vertex-face contact instead of duplicating it through endpoint edge-edge contacts.
+- Keep nonlocal near-parallel LIMX edge-edge contacts at full penalty strength so layered cloth does not cross before edge-face recovery.
+- Preserve outward-oriented VF/EE response on tetrahedral boundary features, including mixed cloth-volume collision and affine-body PE/PP regions.
 - Complete Kamino RCM traversal for large and disconnected systems and reuse the resulting permutation by default; set `reuse_permutation=False` to recompute it for changing matrix topology.
 - Fix panel-parallel RCM-blocked LLT factorization hanging when a matrix ends in a partial tile.
 - Fix `ModelBuilder.add_usd()` marking a `guide`-purpose collider visible when it has a bound render material. Such a collider is not viewport geometry, and the extra `VISIBLE` flag left it drawn by the viewer's visual toggle instead of its collision toggle. `force_show_colliders` still reveals it.

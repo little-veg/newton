@@ -34,14 +34,26 @@ https://newton-physics.github.io/newton/stable/solvers/index.html.
    :toctree: _generated
    :nosignatures:
 
+   AffineBodyModel
+   ConstraintAffineBodyContact
+   ConstraintAffineParticleContact
+   ConstraintAffineStaticPlaneContact
    ConstraintAnchor
+   ConstraintDihedralBending
    ConstraintDistance
+   ConstraintGroupAffine
+   ConstraintGroupDynamic
+   ConstraintSelfCollision
+   ConstraintStaticPlaneContact
+   ConstraintTetrahedronARAP
    ConstraintTriangleElastic
    SolverBase
    SolverFeatherstone
    SolverImplicitMPM
    SolverKamino
    SolverLIMX
+   SolverLIMXAffine
+   SolverLIMXCoupled
    SolverMuJoCo
    SolverSemiImplicit
    SolverStyle3D
