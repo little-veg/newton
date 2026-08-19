@@ -47,6 +47,19 @@ def _accumulate_anchor_force_and_hessian(
     wp.atomic_add(hessian_values, hessian_block_indices[constraint], hessian)
 
 
+@wp.kernel
+def _accumulate_anchor_energy(
+    indices: wp.array[int],
+    targets: wp.array[wp.vec3],
+    stiffnesses: wp.array[float],
+    positions: wp.array[wp.vec3],
+    energy: wp.array[float],
+):
+    constraint = wp.tid()
+    displacement = positions[indices[constraint]] - targets[constraint]
+    wp.atomic_add(energy, 0, 0.5 * stiffnesses[constraint] * wp.dot(displacement, displacement))
+
+
 class ConstraintAnchor:
     """A batch of quadratic constraints anchoring particles to targets."""
 
@@ -135,6 +148,32 @@ class ConstraintAnchor:
             dim=len(self.indices),
             inputs=[self.indices, self.targets, self.stiffnesses, self.hessian_block_indices, positions],
             outputs=[force_output, hessian_values],
+            device=self.device,
+        )
+
+    def accumulate_energy(
+        self,
+        positions: wp.array[wp.vec3],
+        output: wp.array[float],
+        invalid_count: wp.array[int],
+    ) -> None:
+        """Add quadratic anchor energy evaluated at ``positions``.
+
+        Args:
+            positions: Particle positions [m], shape ``[particle_count, 3]``.
+            output: Scalar energy accumulator [J], shape ``[1]``.
+            invalid_count: Scalar invalid-domain counter, shape ``[1]``.
+        """
+        self._validate_runtime_arrays(positions, positions)
+        if output.dtype != wp.float32 or len(output) != 1 or output.device != self.device:
+            raise ValueError("Anchor energy output must be one float on the constraint device")
+        if invalid_count.dtype != wp.int32 or len(invalid_count) != 1 or invalid_count.device != self.device:
+            raise ValueError("Anchor invalid count must be one integer on the constraint device")
+        wp.launch(
+            _accumulate_anchor_energy,
+            dim=len(self.indices),
+            inputs=[self.indices, self.targets, self.stiffnesses, positions],
+            outputs=[output],
             device=self.device,
         )
 

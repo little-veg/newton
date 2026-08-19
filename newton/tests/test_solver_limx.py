@@ -131,6 +131,18 @@ class TestBlockCsr(unittest.TestCase):
 
 
 class TestConstraintAnchor(unittest.TestCase):
+    def test_accumulates_quadratic_energy(self):
+        """Accumulate one-half stiffness times squared anchor displacement."""
+        anchors = ConstraintAnchor([0], [wp.vec3(1.0, 0.0, 0.0)], [10.0], 1, "cpu")
+        positions = wp.array([wp.vec3(1.5, 0.0, 0.0)], dtype=wp.vec3, device="cpu")
+        energy = wp.zeros(1, dtype=float, device="cpu")
+        invalid_count = wp.zeros(1, dtype=int, device="cpu")
+
+        anchors.accumulate_energy(positions, energy, invalid_count)
+
+        self.assertAlmostEqual(float(energy.numpy()[0]), 1.25, places=6)
+        self.assertEqual(int(invalid_count.numpy()[0]), 0)
+
     def test_force_restores_particle_to_target(self):
         anchors = ConstraintAnchor([0], [wp.vec3(1.0, 0.0, 0.0)], [10.0], 1, "cpu")
         positions = wp.array([wp.vec3(1.5, 0.0, 0.0)], dtype=wp.vec3, device="cpu")
