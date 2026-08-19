@@ -1084,6 +1084,64 @@ class TestPcgSolver(unittest.TestCase):
         self.assertLess(executed, 100)
         np.testing.assert_allclose(solution.numpy(), [[1.0, -2.0, 0.5], [0.25, 3.0, -1.0]], rtol=1e-5, atol=1e-6)
 
+    def test_relative_tolerance_stops_and_reports_residual(self):
+        """Stop PCG relative to its initial residual and report the final ratio."""
+        operator = self.make_operator()
+        rhs = wp.array(
+            [wp.vec3(9.75, -23.0, 6.0), wp.vec3(3.0, 50.0, -16.5)],
+            dtype=wp.vec3,
+            device="cpu",
+        )
+        solution = wp.zeros(2, dtype=wp.vec3, device="cpu")
+        solver = PcgSolver(2, "cpu")
+
+        executed = solver.solve(
+            operator,
+            rhs,
+            solution,
+            iterations=100,
+            relative_tolerance=1.0e-6,
+            check_interval=1,
+        )
+
+        self.assertEqual(solver.last_iterations, executed)
+        self.assertLess(executed, 100)
+        self.assertLessEqual(solver.last_relative_residual, 1.0e-6)
+
+    def test_fixed_iteration_path_does_not_report_relative_residual(self):
+        """Preserve synchronization-free fixed-count PCG behavior by default."""
+        operator = self.make_operator()
+        rhs = wp.array(
+            [wp.vec3(9.75, -23.0, 6.0), wp.vec3(3.0, 50.0, -16.5)],
+            dtype=wp.vec3,
+            device="cpu",
+        )
+        solution = wp.zeros(2, dtype=wp.vec3, device="cpu")
+        solver = PcgSolver(2, "cpu")
+
+        executed = solver.solve(operator, rhs, solution, iterations=7)
+
+        self.assertEqual(executed, 7)
+        self.assertEqual(solver.last_iterations, 7)
+        self.assertIsNone(solver.last_relative_residual)
+
+    def test_rejects_absolute_and_relative_tolerances_together(self):
+        """Reject ambiguous simultaneous absolute and relative PCG tolerances."""
+        operator = self.make_operator()
+        rhs = wp.zeros(2, dtype=wp.vec3, device="cpu")
+        solution = wp.zeros_like(rhs)
+        solver = PcgSolver(2, "cpu")
+
+        with self.assertRaisesRegex(ValueError, "tolerance"):
+            solver.solve(
+                operator,
+                rhs,
+                solution,
+                iterations=1,
+                tolerance=1.0e-6,
+                relative_tolerance=1.0e-6,
+            )
+
     def test_zero_rhs_breakdown_guard_stays_finite(self):
         operator = self.make_operator()
         rhs = wp.zeros(2, dtype=wp.vec3, device="cpu")

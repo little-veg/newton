@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import warp as wp
@@ -104,6 +105,18 @@ class PcgSolver:
         self._p_ap = wp.zeros_like(self._rz)
         self._residual_squared = wp.zeros_like(self._rz)
         self._dot_block_count = (dimension + _DOT_BLOCK_DIM - 1) // _DOT_BLOCK_DIM
+        self._last_iterations = 0
+        self._last_relative_residual: float | None = None
+
+    @property
+    def last_iterations(self) -> int:
+        """Return the number of iterations executed by the last solve."""
+        return self._last_iterations
+
+    @property
+    def last_relative_residual(self) -> float | None:
+        """Return the final residual ratio when relative stopping was enabled."""
+        return self._last_relative_residual
 
     def solve(
         self,
@@ -114,6 +127,7 @@ class PcgSolver:
         zero_initial_guess: bool = True,
         tolerance: float | None = None,
         check_interval: int = 1,
+        relative_tolerance: float | None = None,
     ) -> int:
         """Solve ``operator * solution = rhs``.
 
@@ -132,8 +146,15 @@ class PcgSolver:
             raise ValueError("iterations must not be negative")
         if tolerance is not None and tolerance < 0.0:
             raise ValueError("tolerance must not be negative")
+        if relative_tolerance is not None and relative_tolerance < 0.0:
+            raise ValueError("relative_tolerance must not be negative")
+        if tolerance is not None and relative_tolerance is not None:
+            raise ValueError("tolerance and relative_tolerance cannot be used together")
         if check_interval <= 0:
             raise ValueError("check_interval must be positive")
+
+        self._last_iterations = 0
+        self._last_relative_residual = None
 
         if zero_initial_guess:
             solution.zero_()
@@ -147,6 +168,14 @@ class PcgSolver:
                 outputs=[self.residual],
                 device=self.device,
             )
+
+        initial_residual_squared = float(0.0)
+        if relative_tolerance is not None:
+            self._dot(self.residual, self.residual, self._residual_squared)
+            initial_residual_squared = float(self._residual_squared.numpy()[0])
+            if initial_residual_squared == 0.0:
+                self._last_relative_residual = 0.0
+                return 0
 
         self._rz_previous.zero_()
         for iteration in range(iterations):
@@ -185,8 +214,22 @@ class PcgSolver:
             if tolerance is not None and executed % check_interval == 0:
                 self._dot(self.residual, self.residual, self._residual_squared)
                 if float(self._residual_squared.numpy()[0]) <= tolerance * tolerance:
+                    self._last_iterations = executed
                     return executed
 
+            if relative_tolerance is not None and executed % check_interval == 0:
+                self._dot(self.residual, self.residual, self._residual_squared)
+                residual_squared = float(self._residual_squared.numpy()[0])
+                self._last_relative_residual = math.sqrt(max(residual_squared, 0.0) / initial_residual_squared)
+                if residual_squared <= relative_tolerance * relative_tolerance * initial_residual_squared:
+                    self._last_iterations = executed
+                    return executed
+
+        self._last_iterations = iterations
+        if relative_tolerance is not None and (iterations == 0 or iterations % check_interval != 0):
+            self._dot(self.residual, self.residual, self._residual_squared)
+            residual_squared = float(self._residual_squared.numpy()[0])
+            self._last_relative_residual = math.sqrt(max(residual_squared, 0.0) / initial_residual_squared)
         return iterations
 
     def _dot(
