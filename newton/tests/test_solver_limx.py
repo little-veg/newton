@@ -16,6 +16,12 @@ from newton._src.solvers.limx.constraints.self_collision import (
     _ContactBuffer,
     _EdgeEdgeContactBuffer,
 )
+from newton._src.solvers.limx.constraints.tetrahedron_linear_elastic import (
+    ConstraintTetrahedronLinearElastic,
+)
+from newton._src.solvers.limx.constraints.tetrahedron_neo_hookean import (
+    ConstraintTetrahedronNeoHookean,
+)
 from newton._src.solvers.limx.constraints.triangle_elastic import ConstraintTriangleElastic
 from newton._src.solvers.limx.linear_solver import PcgSolver
 from newton._src.solvers.limx.operator import CompositeLinearOperator, EmptyDynamicConstraintOperator
@@ -2667,6 +2673,187 @@ class TestConstraintSelfCollisionDetection(unittest.TestCase):
 
 
 class TestSolverLIMX(unittest.TestCase):
+    @staticmethod
+    def make_particle_model(
+        positions: np.ndarray,
+        velocities: np.ndarray,
+        device: str,
+        particle_mass: float = 1.0,
+    ):
+        builder = newton.ModelBuilder(up_axis="Z")
+        builder.add_particles(
+            pos=[wp.vec3(*position) for position in positions],
+            vel=[wp.vec3(*velocity) for velocity in velocities],
+            mass=[particle_mass] * len(positions),
+            radius=[0.01] * len(positions),
+        )
+        model = builder.finalize(device=device)
+        model.set_gravity((0.0, 0.0, 0.0))
+        return model
+
+    @staticmethod
+    def make_tetrahedron_constraint(constraint_type, device: str):
+        young_modulus = 1.0e6
+        poisson_ratio = 0.3
+        shear_modulus = young_modulus / (2.0 * (1.0 + poisson_ratio))
+        lame_parameter = young_modulus * poisson_ratio / ((1.0 + poisson_ratio) * (1.0 - 2.0 * poisson_ratio))
+        return constraint_type(
+            [(0, 1, 2, 3)],
+            [wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)],
+            [shear_modulus],
+            [lame_parameter],
+            4,
+            device,
+        )
+
+    def test_defaults_preserve_full_step_fixed_iteration_behavior(self):
+        """Preserve legacy LIMX iteration and synchronization behavior by default."""
+        positions = np.zeros((1, 3), dtype=np.float32)
+        model = self.make_particle_model(positions, positions, "cpu")
+
+        solver = SolverLIMX(model, [], nonlinear_iterations=2, linear_iterations=3)
+
+        self.assertIsNone(solver.line_search)
+        self.assertIsNone(solver.linear_tolerance)
+        self.assertIsNone(solver.nonlinear_tolerance)
+        self.assertFalse(solver.record_diagnostics)
+        self.assertEqual(solver.last_step_diagnostics, ())
+
+    def test_rejects_objective_mode_without_constraint_energy(self):
+        """Reject incomplete objectives instead of silently omitting a constraint."""
+        positions = np.asarray([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float32)
+        model = self.make_particle_model(positions, np.zeros_like(positions), "cpu")
+        distance = ConstraintDistance([(0, 1)], [1.0], [10.0], 2, "cpu")
+
+        with self.assertRaisesRegex(ValueError, "accumulate_energy"):
+            SolverLIMX(model, [distance], record_diagnostics=True)
+
+    def test_rejects_line_search_with_dynamic_operator(self):
+        """Reject line search for unsupported matrix-free dynamic objectives."""
+        positions = np.zeros((1, 3), dtype=np.float32)
+        model = self.make_particle_model(positions, positions, "cpu")
+        line_search = SolverLIMX.LineSearch()
+
+        with self.assertRaisesRegex(ValueError, "dynamic"):
+            SolverLIMX(model, [], line_search=line_search, dynamic_operator=object())
+
+    def test_rejects_invalid_objective_solver_configuration(self):
+        """Reject invalid Armijo coefficients, backtrack counts, and tolerances."""
+        invalid_line_searches = [
+            {"armijo_coefficient": 0.0},
+            {"armijo_coefficient": 1.0},
+            {"contraction_factor": 0.0},
+            {"contraction_factor": 1.0},
+            {"max_backtracks": -1},
+            {"max_backtracks": 1.5},
+        ]
+        for parameters in invalid_line_searches:
+            with self.subTest(parameters=parameters), self.assertRaises((TypeError, ValueError)):
+                SolverLIMX.LineSearch(**parameters)
+
+        positions = np.zeros((1, 3), dtype=np.float32)
+        model = self.make_particle_model(positions, positions, "cpu")
+        for keyword in ("linear_tolerance", "nonlinear_tolerance"):
+            with self.subTest(keyword=keyword), self.assertRaisesRegex(ValueError, keyword):
+                SolverLIMX(model, [], **{keyword: 0.0})
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
+    def test_quadratic_objective_reaches_linear_accuracy_after_one_step(self):
+        """Reduce a quadratic implicit objective to the PCG accuracy floor in one Newton step."""
+        rest_positions = np.asarray(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        deformed_positions = np.asarray(
+            [[0.03, -0.02, 0.01], [0.78, 0.18, -0.04], [0.05, 0.91, 0.12], [-0.03, 0.08, 0.87]],
+            dtype=np.float32,
+        )
+        with wp.ScopedDevice("cuda:0"):
+            model = self.make_particle_model(rest_positions, np.zeros_like(rest_positions), "cuda:0")
+            constraints = [
+                ConstraintAnchor([0, 2, 3], [wp.vec3(*rest_positions[i]) for i in (0, 2, 3)], [1.0e8] * 3, 4, "cuda:0"),
+                self.make_tetrahedron_constraint(ConstraintTetrahedronLinearElastic, "cuda:0"),
+            ]
+            solver = SolverLIMX(
+                model,
+                constraints,
+                nonlinear_iterations=3,
+                linear_iterations=100,
+                linear_tolerance=1.0e-7,
+                nonlinear_tolerance=1.0e-5,
+                record_diagnostics=True,
+            )
+            state_in = model.state()
+            state_out = model.state()
+            state_in.particle_q.assign(deformed_positions)
+            solver.step(state_in, state_out, None, None, 0.03)
+            records = solver.last_step_diagnostics
+
+        self.assertGreaterEqual(len(records), 1)
+        self.assertEqual(records[0].step_length, 1.0)
+        if len(records) > 1:
+            self.assertLessEqual(records[1].relative_gradient_norm, 2.0e-5)
+
+    @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
+    def test_armijo_backtracks_to_positive_sufficient_decrease(self):
+        """Backtrack an unsafe Neo-Hookean step to a positive sufficient decrease."""
+        rest_positions = np.asarray(
+            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            dtype=np.float32,
+        )
+        current_positions = np.asarray(
+            [[0.0, 0.0, 0.0], [0.22, 0.04, 0.0], [0.03, 0.35, 0.02], [0.01, 0.02, 0.18]],
+            dtype=np.float32,
+        )
+        velocities = np.asarray(
+            [[0.0, 0.0, 0.0], [-4.0, 1.0, 0.0], [1.0, -5.0, 0.0], [0.0, 1.0, -4.0]],
+            dtype=np.float32,
+        )
+        velocity_multiplier = 180.0
+        velocities *= velocity_multiplier
+
+        def run(line_search):
+            model = self.make_particle_model(
+                rest_positions,
+                velocities,
+                "cuda:0",
+                particle_mass=1000.0 / 24.0,
+            )
+            constraints = [
+                ConstraintAnchor([0], [wp.vec3(0.0)], [1.0e8], 4, "cuda:0"),
+                self.make_tetrahedron_constraint(ConstraintTetrahedronNeoHookean, "cuda:0"),
+            ]
+            solver = SolverLIMX(
+                model,
+                constraints,
+                nonlinear_iterations=1,
+                linear_iterations=256,
+                line_search=line_search,
+                linear_tolerance=1.0e-6,
+                record_diagnostics=True,
+            )
+            state_in = model.state()
+            state_out = model.state()
+            state_in.particle_q.assign(current_positions)
+            state_in.particle_qd.assign(velocities)
+            solver.step(state_in, state_out, None, None, 0.05)
+            return solver.last_step_diagnostics[0]
+
+        with wp.ScopedDevice("cuda:0"):
+            full_step = run(None)
+            armijo = run(SolverLIMX.LineSearch())
+
+        self.assertTrue(
+            full_step.status in {"invalid_candidate", "nonfinite_objective"}
+            or full_step.objective_after > full_step.objective_before
+        )
+        self.assertGreater(armijo.backtracks, 0)
+        self.assertGreater(armijo.minimum_determinant, 0.0)
+        self.assertLessEqual(
+            armijo.objective_after,
+            armijo.objective_before + 1.0e-4 * armijo.step_length * armijo.directional_derivative,
+        )
+
     @unittest.skipUnless(wp.is_cuda_available(), "Requires CUDA")
     def test_twist_example_drives_opposite_boundary_rotations(self):
         """Match the ChysX mesh and rotate its end sections oppositely."""
