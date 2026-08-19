@@ -4,12 +4,14 @@
 """Tests for the LIMX Neo-Hookean cantilever example."""
 
 import argparse
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import warp as wp
 
-from newton.examples.softbody.example_softbody_limx_neo_hookean_beam import Example
+from newton.examples.softbody.example_softbody_limx_neo_hookean_beam import Example, run_convergence_study
 from newton.viewer import ViewerNull
 
 
@@ -62,6 +64,54 @@ class TestNeoHookeanBeamExample(unittest.TestCase):
             example = Example(ViewerNull(num_frames=1), make_args(line_search=False))
 
         self.assertIsNone(example.solver.line_search)
+
+    def test_convergence_study_writes_complete_csv(self):
+        """Write one diagnostic row per recorded Newton iteration."""
+        with tempfile.TemporaryDirectory() as temp_dir, wp.ScopedDevice("cuda:0"):
+            rows = run_convergence_study(
+                "cuda:0",
+                Path(temp_dir),
+                checkpoint_time=0.02,
+                time_steps=(0.01,),
+                max_newton_iterations=3,
+            )
+            csv_path = Path(temp_dir) / "limx_neo_hookean_convergence.csv"
+
+            self.assertTrue(csv_path.is_file())
+            self.assertEqual(
+                {row["method"] for row in rows},
+                {"quadratic", "neo_hookean_full", "neo_hookean_armijo"},
+            )
+            required = {
+                "time_step",
+                "method",
+                "iteration",
+                "objective_before",
+                "objective_after",
+                "relative_gradient_norm",
+                "step_length",
+                "backtracks",
+                "linear_iterations",
+                "linear_relative_residual",
+                "minimum_determinant",
+                "status",
+            }
+            self.assertTrue(required.issubset(rows[0]))
+
+    def test_convergence_study_writes_nonempty_png(self):
+        """Render the six-panel convergence comparison to a nonempty PNG."""
+        with tempfile.TemporaryDirectory() as temp_dir, wp.ScopedDevice("cuda:0"):
+            run_convergence_study(
+                "cuda:0",
+                Path(temp_dir),
+                checkpoint_time=0.02,
+                time_steps=(0.01,),
+                max_newton_iterations=3,
+            )
+            png_path = Path(temp_dir) / "limx_neo_hookean_convergence.png"
+
+            self.assertTrue(png_path.is_file())
+            self.assertGreater(png_path.stat().st_size, 1000)
 
 
 if __name__ == "__main__":
