@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+import newton
 from newton._src.solvers.limx.block_csr import BlockCsrBuilder
 from newton._src.solvers.limx.constraints.tetrahedron_elastic_common import _project_psd, mat99
 from newton._src.solvers.limx.constraints.tetrahedron_linear_elastic import (
@@ -40,6 +41,19 @@ DEFORMED_POSITIONS = np.asarray(
     ],
     dtype=np.float32,
 )
+
+
+class TestConstraintTetrahedronElasticPublicAPI(unittest.TestCase):
+    def test_public_exports(self):
+        """Expose LIMX tetrahedral materials through the public solver module."""
+        self.assertIs(
+            newton.solvers.ConstraintTetrahedronLinearElastic,
+            ConstraintTetrahedronLinearElastic,
+        )
+        self.assertIs(
+            newton.solvers.ConstraintTetrahedronNeoHookean,
+            ConstraintTetrahedronNeoHookean,
+        )
 
 
 @wp.kernel

@@ -14,6 +14,8 @@ from .dynamic_group import ConstraintGroupDynamic
 from .self_collision import ConstraintSelfCollision
 from .static_plane_contact import ConstraintStaticPlaneContact
 from .tetrahedron_arap import ConstraintTetrahedronARAP
+from .tetrahedron_linear_elastic import ConstraintTetrahedronLinearElastic
+from .tetrahedron_neo_hookean import ConstraintTetrahedronNeoHookean
 from .triangle_elastic import ConstraintTriangleElastic
 
 __all__ = [
@@ -28,5 +30,7 @@ __all__ = [
     "ConstraintSelfCollision",
     "ConstraintStaticPlaneContact",
     "ConstraintTetrahedronARAP",
+    "ConstraintTetrahedronLinearElastic",
+    "ConstraintTetrahedronNeoHookean",
     "ConstraintTriangleElastic",
 ]

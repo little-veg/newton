@@ -16,6 +16,8 @@ from .constraints import (
     ConstraintSelfCollision,
     ConstraintStaticPlaneContact,
     ConstraintTetrahedronARAP,
+    ConstraintTetrahedronLinearElastic,
+    ConstraintTetrahedronNeoHookean,
     ConstraintTriangleElastic,
 )
 from .linear_solver import PcgSolver
@@ -38,6 +40,8 @@ __all__ = [
     "ConstraintSelfCollision",
     "ConstraintStaticPlaneContact",
     "ConstraintTetrahedronARAP",
+    "ConstraintTetrahedronLinearElastic",
+    "ConstraintTetrahedronNeoHookean",
     "ConstraintTriangleElastic",
     "EmptyDynamicConstraintOperator",
     "PcgSolver",
