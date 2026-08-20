@@ -161,6 +161,37 @@ class TestConstraintTetrahedronLinearElastic(unittest.TestCase):
                     "cuda:0",
                 )
 
+    def test_rejects_invalid_topology_and_rest_data(self):
+        """Reject duplicate indices and non-positive or singular rest volumes."""
+        with wp.ScopedDevice("cuda:0"):
+            with self.assertRaisesRegex(ValueError, "distinct"):
+                ConstraintTetrahedronLinearElastic(
+                    [(0, 1, 1, 3)],
+                    INVERSE_REST_MATRICES,
+                    [4.0],
+                    [7.0],
+                    4,
+                    "cuda:0",
+                )
+            with self.assertRaisesRegex(ValueError, "positive rest volumes"):
+                ConstraintTetrahedronLinearElastic(
+                    TETRAHEDRA,
+                    [wp.mat33(-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)],
+                    [4.0],
+                    [7.0],
+                    4,
+                    "cuda:0",
+                )
+            with self.assertRaisesRegex(ValueError, "nonsingular"):
+                ConstraintTetrahedronLinearElastic(
+                    TETRAHEDRA,
+                    [wp.mat33(0.0)],
+                    [4.0],
+                    [7.0],
+                    4,
+                    "cuda:0",
+                )
+
     def test_force_matches_negative_energy_gradient(self):
         """Match quadratic tetrahedral force to centered energy differences."""
         with wp.ScopedDevice("cuda:0"):

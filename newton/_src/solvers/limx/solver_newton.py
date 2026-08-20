@@ -124,7 +124,13 @@ class SolverLIMX(SolverBase):
 
     @dataclass(frozen=True)
     class LineSearch:
-        """Armijo backtracking parameters."""
+        """Armijo backtracking parameters.
+
+        Attributes:
+            armijo_coefficient: Sufficient-decrease coefficient.
+            contraction_factor: Step-length multiplier after a rejected trial.
+            max_backtracks: Maximum number of step-length contractions.
+        """
 
         armijo_coefficient: float = 1.0e-4
         contraction_factor: float = 0.5
@@ -142,7 +148,27 @@ class SolverLIMX(SolverBase):
 
     @dataclass(frozen=True)
     class IterationDiagnostics:
-        """Immutable diagnostics for one nonlinear iteration."""
+        """Immutable diagnostics for one nonlinear iteration.
+
+        ``status`` is one of ``accepted``, ``converged``, ``iteration_limit``,
+        ``invalid_current``, ``invalid_candidate``, ``nonfinite_objective``,
+        ``non_descent_direction``, or ``line_search_failed``.
+
+        Attributes:
+            iteration: Zero-based nonlinear iteration index.
+            objective_before: Implicit objective before the trial step [J].
+            objective_after: Implicit objective after the accepted step [J].
+            gradient_norm: Euclidean objective-gradient norm [N].
+            relative_gradient_norm: Gradient norm relative to the first iteration.
+            step_norm: Euclidean norm of the accepted position increment [m].
+            step_length: Accepted fraction of the projected-Newton direction.
+            backtracks: Number of rejected larger step lengths.
+            directional_derivative: Objective directional derivative [J].
+            linear_iterations: Number of PCG iterations executed.
+            linear_relative_residual: Final PCG residual ratio, when enabled.
+            minimum_determinant: Minimum tetrahedral deformation determinant.
+            status: Iteration outcome or terminal reason.
+        """
 
         iteration: int
         objective_before: float
@@ -355,13 +381,19 @@ class SolverLIMX(SolverBase):
         inv_dt_squared = 1.0 / (dt * dt)
         diagnostics: list[SolverLIMX.IterationDiagnostics] = []
         initial_gradient_norm: float | None = None
+        iterate_objective: float | None = None
         for nonlinear_iteration in range(self.nonlinear_iterations):
             objective_before = math.nan
             if self._objective_mode:
-                objective_before, invalid_count = self._evaluate_objective(
-                    self.iterate_positions,
-                    inv_dt_squared,
-                )
+                if iterate_objective is None:
+                    objective_before, invalid_count = self._evaluate_objective(
+                        self.iterate_positions,
+                        inv_dt_squared,
+                    )
+                else:
+                    # Preserve the accepted scalar so atomic reduction order cannot relax the next Armijo bound.
+                    objective_before = iterate_objective
+                    invalid_count = 0
                 if invalid_count > 0 or not math.isfinite(objective_before):
                     if self.record_diagnostics:
                         diagnostics.append(
@@ -517,6 +549,7 @@ class SolverLIMX(SolverBase):
                         <= objective_before + self.line_search.armijo_coefficient * step_length * directional_derivative
                     ):
                         wp.copy(self.iterate_positions, self.candidate_positions)
+                        iterate_objective = objective_after
                         accepted = True
                         break
                     step_length *= self.line_search.contraction_factor
@@ -578,6 +611,8 @@ class SolverLIMX(SolverBase):
                 )
                 wp.copy(self.iterate_positions, self.candidate_positions)
                 failed = invalid_count > 0 or not math.isfinite(objective_after)
+                if not failed:
+                    iterate_objective = objective_after
                 if self.record_diagnostics:
                     diagnostics.append(
                         SolverLIMX.IterationDiagnostics(

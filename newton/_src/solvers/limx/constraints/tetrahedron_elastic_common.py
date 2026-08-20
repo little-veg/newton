@@ -119,6 +119,16 @@ class _TetrahedronElasticConstraintBase:
         particle_count: int,
         device: Any,
     ):
+        """Create a tetrahedral elastic constraint batch.
+
+        Args:
+            tetrahedron_indices: Four particle indices per tetrahedron.
+            inverse_rest_matrices: Inverse rest matrices per tetrahedron [1/m].
+            shear_moduli: Shear modulus per tetrahedron [Pa].
+            lame_parameters: First Lamé parameter per tetrahedron [Pa].
+            particle_count: Number of particles in the associated model.
+            device: Warp device storing runtime arrays.
+        """
         if particle_count <= 0:
             raise ValueError("particle_count must be positive")
         tetrahedron_count = len(tetrahedron_indices)

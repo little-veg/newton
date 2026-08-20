@@ -521,13 +521,15 @@ start current vertices at
 `[(0,0,0), (0.22,0.04,0), (0.03,0.35,0.02), (0.01,0.02,0.18)]`,
 and assign free-vertex velocities
 `[(0,0,0), (-4,1,0), (1,-5,0), (0,1,-4)] m/s`. Use `dt=0.05 s`,
-`E=1.0e6 Pa`, and `nu=0.3`. First run the no-search solver and assert from its
-diagnostic record that the full candidate is either invalid or has
-`objective_after > objective_before`; if this exact fp32 fixture does not
-trigger either condition, scale all three free-vertex velocities together by
-the smallest integer in `[2, 3, 4]` that does, then freeze that multiplier in
-the test before implementation is committed. From the same frozen `state_in`,
-compare the Armijo solver and assert:
+`E=1.0e6 Pa`, and `nu=0.3`. The initial `[2, 3, 4]` multiplier probe did not
+make the full step unsafe. A subsequent deterministic integer sweep over the
+same velocity direction found that multipliers `1` through `179` decreased the
+objective and `180` was the first to increase it (`+3936 J` in the approved
+fp32 fixture). Freeze `180` in the regression rather than searching at test
+time. First run the no-search solver and assert from its diagnostic record
+that the full candidate is either invalid or has
+`objective_after > objective_before`. From the same frozen `state_in`, compare
+the Armijo solver and assert:
 
 ```python
 def test_armijo_backtracks_to_positive_sufficient_decrease(self):
@@ -909,11 +911,23 @@ neo_hookean_full
 neo_hookean_armijo
 ```
 
-Use a high-accuracy Armijo solve of the same material and time step to define the reference objective for normalized gaps. Preserve raw values and terminal failure rows. Compute normalized gaps within each material/time-step objective only; never subtract the quadratic reference from Neo-Hookean energy.
+Use a tighter-tolerance Armijo solve of the same material and time step as one
+candidate for the normalized-gap baseline. Because fp32 anchor cancellation
+can stop this solve before its requested gradient tolerance, define the
+baseline as the lowest finite objective observed across the tight solve and
+the measured runs. Record the baseline source and the tight solve's terminal
+status and relative gradient norm. Preserve raw values and terminal failure
+rows. Compute normalized gaps within each material/time-step objective only;
+never subtract the quadratic baseline from Neo-Hookean energy.
 
 - [ ] **Step 5: Implement stable CSV serialization**
 
-Use a fixed field order beginning with `time_step`, `method`, and `iteration`, followed by every `IterationDiagnostics` field plus `objective_gap` and terminal status. Convert `None` linear residuals to an empty CSV field rather than the string `None`.
+Use a fixed field order beginning with `time_step`, `method`, and `iteration`,
+followed by every `IterationDiagnostics` field plus `objective_baseline`,
+`baseline_source`, the tight-reference objective and terminal metadata, and
+`objective_gap`.
+Convert `None` linear residuals to an empty CSV field rather than the string
+`None`.
 
 - [ ] **Step 6: Implement the `2 x 3` Matplotlib plot**
 

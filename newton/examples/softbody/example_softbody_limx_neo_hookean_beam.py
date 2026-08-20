@@ -175,15 +175,17 @@ def _run_study_solve(
     return solver.last_step_diagnostics
 
 
-def _reference_objective(records) -> float:
-    finite_objectives = [
-        value
-        for record in records
-        for value in (record.objective_before, record.objective_after)
-        if math.isfinite(value)
-    ]
+def _minimum_finite_objective(records) -> float:
+    finite_objectives = []
+    for record in records:
+        if record.status != "invalid_current" and math.isfinite(record.objective_before):
+            finite_objectives.append(record.objective_before)
+        if record.status not in {"invalid_current", "invalid_candidate", "nonfinite_objective"} and math.isfinite(
+            record.objective_after
+        ):
+            finite_objectives.append(record.objective_after)
     if not finite_objectives:
-        raise RuntimeError("Reference solve produced no finite objective")
+        raise RuntimeError("Convergence solve produced no finite objective")
     return min(finite_objectives)
 
 
@@ -204,6 +206,11 @@ def _write_convergence_csv(rows: list[dict[str, float | int | str]], output_path
         "linear_relative_residual",
         "minimum_determinant",
         "status",
+        "objective_baseline",
+        "baseline_source",
+        "tight_reference_objective",
+        "tight_reference_status",
+        "tight_reference_relative_gradient_norm",
         "objective_gap",
     ]
     with output_path.open("w", newline="", encoding="utf-8") as output:
@@ -257,12 +264,24 @@ def _write_convergence_plot(
             )
             terminal = method_rows[-1]
             if terminal["status"] != "accepted":
-                axes[0, column].annotate(
-                    str(terminal["status"]),
-                    (iterations[-1], relative_gradients[-1]),
-                    fontsize=7,
-                    color=color,
-                )
+                terminal_values = (relative_gradients[-1], objective_gaps[-1])
+                for row, value in enumerate(terminal_values):
+                    if math.isfinite(value):
+                        axes[row, column].scatter(
+                            [iterations[-1]],
+                            [value],
+                            color=color,
+                            marker="x",
+                            s=45,
+                            zorder=5,
+                        )
+                if math.isfinite(relative_gradients[-1]):
+                    axes[0, column].annotate(
+                        str(terminal["status"]),
+                        (iterations[-1], relative_gradients[-1]),
+                        fontsize=7,
+                        color=color,
+                    )
 
         axes[0, column].set_title(f"dt = {time_step:.2f} s")
         for row in range(2):
@@ -271,7 +290,7 @@ def _write_convergence_plot(
             axes[row, column].grid(True, which="both", alpha=0.3)
 
     axes[0, 0].set_ylabel("Relative gradient norm")
-    axes[1, 0].set_ylabel("Normalized objective gap")
+    axes[1, 0].set_ylabel("Normalized gap to best observed")
     handles, labels = axes[0, 0].get_legend_handles_labels()
     figure.legend(handles, labels, loc="upper center", ncol=3)
     figure.tight_layout(rect=(0.0, 0.0, 1.0, 0.94))
@@ -302,7 +321,7 @@ def run_convergence_study(
         ("neo_hookean_armijo", "neo_hookean", True),
     )
 
-    references: dict[tuple[float, str], float] = {}
+    tight_references = {}
     for time_step in time_steps:
         for material in ("quadratic", "neo_hookean"):
             reference_records = _run_study_solve(
@@ -317,12 +336,13 @@ def run_convergence_study(
                 linear_tolerance=1.0e-7,
                 nonlinear_tolerance=1.0e-6,
             )
-            references[(time_step, material)] = _reference_objective(reference_records)
+            _minimum_finite_objective(reference_records)
+            tight_references[(time_step, material)] = reference_records
 
-    rows: list[dict[str, float | int | str]] = []
+    run_records = {}
     for time_step in time_steps:
         for method, material, line_search in method_configs:
-            records = _run_study_solve(
+            run_records[(time_step, method)] = _run_study_solve(
                 material,
                 device,
                 positions,
@@ -331,13 +351,45 @@ def run_convergence_study(
                 line_search=line_search,
                 nonlinear_iterations=max_newton_iterations,
             )
-            reference = references[(time_step, material)]
+
+    baselines = {}
+    for time_step in time_steps:
+        for material in ("quadratic", "neo_hookean"):
+            candidates = [
+                (
+                    _minimum_finite_objective(tight_references[(time_step, material)]),
+                    "tight_reference",
+                )
+            ]
+            for method, candidate_material, _ in method_configs:
+                if candidate_material == material:
+                    candidates.append(
+                        (
+                            _minimum_finite_objective(run_records[(time_step, method)]),
+                            method,
+                        )
+                    )
+            baselines[(time_step, material)] = min(candidates, key=lambda candidate: candidate[0])
+
+    rows: list[dict[str, float | int | str]] = []
+    for time_step in time_steps:
+        for method, material, _ in method_configs:
+            records = run_records[(time_step, method)]
+            baseline, baseline_source = baselines[(time_step, material)]
+            tight_reference = tight_references[(time_step, material)]
+            tight_reference_terminal = tight_reference[-1]
+            tight_reference_objective = _minimum_finite_objective(tight_reference)
             initial_objective = records[0].objective_before
-            normalization = max(abs(initial_objective - reference), 1.0e-12)
+            normalization = max(abs(initial_objective - baseline), 1.0e-12)
             for record in records:
                 row = {"time_step": time_step, "method": method, **asdict(record)}
+                row["objective_baseline"] = baseline
+                row["baseline_source"] = baseline_source
+                row["tight_reference_objective"] = tight_reference_objective
+                row["tight_reference_status"] = tight_reference_terminal.status
+                row["tight_reference_relative_gradient_norm"] = tight_reference_terminal.relative_gradient_norm
                 row["objective_gap"] = (
-                    max((record.objective_after - reference) / normalization, 0.0)
+                    max((record.objective_after - baseline) / normalization, 0.0)
                     if math.isfinite(record.objective_after)
                     else math.inf
                 )

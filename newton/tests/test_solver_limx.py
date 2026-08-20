@@ -2809,6 +2809,7 @@ class TestSolverLIMX(unittest.TestCase):
             [[0.0, 0.0, 0.0], [-4.0, 1.0, 0.0], [1.0, -5.0, 0.0], [0.0, 1.0, -4.0]],
             dtype=np.float32,
         )
+        # An exhaustive integer sweep found 180 as the first multiplier that makes this full step increase energy.
         velocity_multiplier = 180.0
         velocities *= velocity_multiplier
 

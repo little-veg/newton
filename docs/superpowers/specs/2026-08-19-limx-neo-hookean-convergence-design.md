@@ -328,12 +328,16 @@ The benchmark avoids comparing different incoming states:
    - logarithmic Neo-Hookean elasticity with full steps;
    - logarithmic Neo-Hookean elasticity with Armijo backtracking.
 
-For each material and time step, a high-accuracy Armijo run supplies the
-reference objective used only to compute a normalized objective gap. Raw
-objective and gradient values remain in the CSV so the graph does not hide a
-poor reference. Objective gaps are normalized within each objective; raw
-energy magnitudes are never compared between the quadratic and Neo-Hookean
-materials.
+For each material and time step, a tighter-tolerance Armijo run participates in
+the objective-baseline search. The `1.0e8 N/m` anchors and fp32 particle state
+can reach an objective-resolution floor before the requested gradient
+tolerance, so the plot does not claim that this run is a converged optimum.
+Instead, the lowest finite objective observed across the tight run and the
+measured runs defines a best-observed baseline. The CSV records the baseline
+source plus the tight run's terminal status and relative gradient norm so a
+poor reference cannot be hidden by the normalized plot. Objective gaps are
+normalized within each objective; raw energy magnitudes are never compared
+between the quadratic and Neo-Hookean materials.
 
 The quadratic checkpoint is intentionally the same finite-deformation state
 as the Neo-Hookean runs. Its non-objective large-rotation behavior is not
@@ -349,15 +353,17 @@ The convergence-study command writes:
 
 The PNG is a `2 x 3` plot. Columns correspond to the three time steps. The top
 row plots relative gradient norm on a logarithmic scale; the bottom row plots
-normalized objective gap on a logarithmic scale. Curves identify the
-quadratic baseline, Neo-Hookean full step, and Neo-Hookean Armijo. A terminal
-marker and annotation indicate inversion, non-finite state, non-descent
-direction, line-search exhaustion, or iteration limit.
+the normalized gap to the best observed objective on a logarithmic scale.
+Curves identify the quadratic baseline, Neo-Hookean full step, and Neo-Hookean
+Armijo. A terminal marker and annotation indicate inversion, non-finite state,
+non-descent direction, line-search exhaustion, or iteration limit.
 
 The CSV uses one row per recorded Newton iteration and includes every solver
-diagnostic plus material, line-search mode, time step, and run status. It is
-written with the Python standard library. Matplotlib is imported locally from
-Newton's existing `examples` extra; no dependency is added.
+diagnostic plus material, line-search mode, time step, run status,
+best-observed objective, baseline source, and tight-reference terminal
+metadata. It is written with the Python standard library. Matplotlib is
+imported locally from Newton's existing `examples` extra; no dependency is
+added.
 
 The dynamic example provides an explicit line-search on/off option and renders
 the same beam without contact. It also implements `test_post_step()` and
